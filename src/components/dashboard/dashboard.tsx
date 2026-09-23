@@ -1,10 +1,11 @@
 "use client";
 
-import { ApertureIcon } from "lucide-react";
+import { ApertureIcon, RadioIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { useGeneration } from "@/hooks/use-generation";
+import { Button } from "@/components/ui/button";
+import { isBusy, useGeneration } from "@/hooks/use-generation";
 import { DEFAULT_PARAMS, type GenerationParams } from "@/lib/comfy/types";
 
 import { ControlPanel, type ComfyOptions } from "./control-panel";
@@ -18,7 +19,7 @@ export function Dashboard() {
   const [params, setParamsState] = useState<GenerationParams>(DEFAULT_PARAMS);
   const [reference, setReference] = useState<File | null>(null);
   const [options, setOptions] = useState<ComfyOptions | null>(null);
-  const { job, history, generate, cancel, show, clearHistory } = useGeneration();
+  const { job, display, viewing, history, generate, cancel, show, backToLive, clearHistory } = useGeneration();
 
   const setParams = useCallback((patch: Partial<GenerationParams>) => {
     setParamsState((prev) => {
@@ -52,7 +53,7 @@ export function Dashboard() {
       });
   }, []);
 
-  const busy = job.status === "submitting" || job.status === "queued" || job.status === "running";
+  const busy = isBusy(job.status);
   const status = options === null ? "connecting" : options.online ? "online" : "offline";
 
   return (
@@ -92,10 +93,15 @@ export function Dashboard() {
 
       <main className="relative isolate flex min-h-[70vh] min-w-0 flex-1 flex-col gap-4 p-4 sm:p-6">
         <div className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,oklch(0.35_0.12_300/0.25),transparent_60%)]" />
+        {viewing && busy && (
+          <Button variant="secondary" size="sm" className="absolute top-4 left-1/2 z-10 -translate-x-1/2 shadow-lg" onClick={backToLive}>
+            <RadioIcon className="text-fuchsia-400" /> Rendering in background · back to live
+          </Button>
+        )}
         <div className="min-h-0 flex-1">
-          <Stage job={job} width={params.width} height={params.height} />
+          <Stage job={display} width={params.width} height={params.height} />
         </div>
-        <HistoryStrip items={history} activeId={job.promptId} onSelect={show} onClear={clearHistory} />
+        <HistoryStrip items={history} activeId={display.promptId} onSelect={show} onClear={clearHistory} />
       </main>
     </div>
   );

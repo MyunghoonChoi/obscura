@@ -29,60 +29,68 @@ export interface JobState {
   seed?: number;
 }
 
+/** Everything needed to (re)attach to a job's event stream — persisted so a page reload can resume it. */
+interface ActiveJob {
+  promptId: string;
+  clientId: string;
+  labels: Record<string, string>;
+  seed: number;
+  prompt: string;
+  mode: GenerationParams["mode"];
+  startedAt: number;
+}
+
 const HISTORY_KEY = "obscura:history";
+const ACTIVE_KEY = "obscura:active";
 const IDLE: JobState = { status: "idle", queuePosition: null, results: [] };
+
+function store(key: string, value: unknown) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
+function load<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export const isBusy = (s: JobStatus) => s === "submitting" || s === "queued" || s === "running";
 
 /**
  * Client half of the async pipeline:
- *   1. POST /api/generate            → { promptId, clientId, labels }
+ *   1. POST /api/generate                → { promptId, clientId, labels }
  *   2. EventSource /api/jobs/:id/stream  ← queued / executing / progress / preview / done / error
+ *
+ * `job` is the live render; `viewing` is a history item the user is looking at.
+ * They're independent, so browsing history never detaches the running job.
  */
 export function useGeneration() {
   const [job, setJob] = useState<JobState>(IDLE);
+  const [viewing, setViewing] = useState<HistoryItem | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const sourceRef = useRef<EventSource | null>(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw));
-    } catch {}
-    return () => sourceRef.current?.close();
-  }, []);
-
   const pushHistory = useCallback((item: HistoryItem) => {
     setHistory((prev) => {
-      const next = [item, ...prev].slice(0, 60);
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      } catch {}
+      const next = [item, ...prev.filter((h) => h.id !== item.id)].slice(0, 60);
+      store(HISTORY_KEY, next);
       return next;
     });
   }, []);
 
-  const generate = useCallback(
-    async (params: GenerationParams, reference: File | null) => {
+  const follow = useCallback(
+    (active: ActiveJob) => {
       sourceRef.current?.close();
-      setJob({ ...IDLE, status: "submitting", startedAt: Date.now() });
+      store(ACTIVE_KEY, active);
+      setJob({ ...IDLE, status: "queued", promptId: active.promptId, seed: active.seed, startedAt: active.startedAt });
 
-      const body = new FormData();
-      body.append("params", JSON.stringify(params));
-      if (reference) body.append("reference", reference);
-
-      let data: { promptId: string; clientId: string; labels: Record<string, string>; seed: number; error?: string };
-      try {
-        const res = await fetch("/api/generate", { method: "POST", body });
-        data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      } catch (err) {
-        setJob((j) => ({ ...j, status: "error", error: (err as Error).message }));
-        return;
-      }
-
-      const { promptId, clientId, labels, seed } = data;
-      setJob((j) => ({ ...j, status: "queued", promptId, seed }));
-
-      const es = new EventSource(`/api/jobs/${promptId}/stream?clientId=${clientId}`);
+      const es = new EventSource(`/api/jobs/${active.promptId}/stream?clientId=${active.clientId}`);
       sourceRef.current = es;
 
       es.onmessage = (msg) => {
@@ -92,7 +100,7 @@ export function useGeneration() {
             setJob((j) => ({ ...j, status: ev.position ? "queued" : "running", queuePosition: ev.position }));
             break;
           case "executing":
-            setJob((j) => ({ ...j, status: "running", stage: labels[ev.node] ?? `Node ${ev.node}`, progress: undefined }));
+            setJob((j) => ({ ...j, status: "running", stage: active.labels[ev.node] ?? `Node ${ev.node}`, progress: undefined }));
             break;
           case "progress":
             setJob((j) => ({ ...j, status: "running", progress: { value: ev.value, max: ev.max } }));
@@ -102,12 +110,22 @@ export function useGeneration() {
             break;
           case "done":
             es.close();
+            store(ACTIVE_KEY, null);
             setJob((j) => ({ ...j, status: "done", results: ev.results, stage: undefined }));
+            setViewing(null); // jump to the fresh result
             if (ev.results.length)
-              pushHistory({ id: promptId, prompt: params.prompt, mode: params.mode, seed, createdAt: Date.now(), results: ev.results });
+              pushHistory({
+                id: active.promptId,
+                prompt: active.prompt,
+                mode: active.mode,
+                seed: active.seed,
+                createdAt: Date.now(),
+                results: ev.results,
+              });
             break;
           case "error":
             es.close();
+            store(ACTIVE_KEY, null);
             setJob((j) => ({ ...j, status: "error", error: ev.message }));
             break;
         }
@@ -115,6 +133,38 @@ export function useGeneration() {
       // EventSource auto-reconnects on network errors; the server re-checks /history on reconnect.
     },
     [pushHistory],
+  );
+
+  // Restore history, and re-attach to a render that was still running when the page was closed.
+  useEffect(() => {
+    const saved = load<HistoryItem[]>(HISTORY_KEY);
+    if (saved) setHistory(saved);
+    const active = load<ActiveJob>(ACTIVE_KEY);
+    if (active) follow(active);
+    return () => sourceRef.current?.close();
+  }, [follow]);
+
+  const generate = useCallback(
+    async (params: GenerationParams, reference: File | null) => {
+      sourceRef.current?.close();
+      setViewing(null);
+      const startedAt = Date.now();
+      setJob({ ...IDLE, status: "submitting", startedAt });
+
+      const body = new FormData();
+      body.append("params", JSON.stringify(params));
+      if (reference) body.append("reference", reference);
+
+      try {
+        const res = await fetch("/api/generate", { method: "POST", body });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        follow({ ...data, prompt: params.prompt, mode: params.mode, startedAt });
+      } catch (err) {
+        setJob((j) => ({ ...j, status: "error", error: (err as Error).message }));
+      }
+    },
+    [follow],
   );
 
   const cancel = useCallback(async () => {
@@ -125,17 +175,16 @@ export function useGeneration() {
     }).catch(() => {});
   }, [job.promptId]);
 
-  const show = useCallback((item: HistoryItem) => {
-    sourceRef.current?.close();
-    setJob({ ...IDLE, status: "done", results: item.results, seed: item.seed, promptId: item.id });
-  }, []);
-
   const clearHistory = useCallback(() => {
     setHistory([]);
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-    } catch {}
+    setViewing(null);
+    store(HISTORY_KEY, null);
   }, []);
 
-  return { job, history, generate, cancel, show, clearHistory };
+  /** What the stage should render: the history item being viewed, else the live job. */
+  const display: JobState = viewing
+    ? { ...IDLE, status: "done", results: viewing.results, seed: viewing.seed, promptId: viewing.id }
+    : job;
+
+  return { job, display, viewing, history, generate, cancel, show: setViewing, backToLive: () => setViewing(null), clearHistory };
 }

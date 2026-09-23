@@ -80,6 +80,33 @@ npm run dev                  # http://localhost:3000
 
 The status badge in the top-left turns green once `/object_info` responds.
 
+### Local Windows setup (tested on RTX 4060 8 GB)
+
+1. Download `ComfyUI_windows_portable_nvidia_cu126.7z` from the [ComfyUI releases](https://github.com/comfyanonymous/ComfyUI/releases). It bundles its own Python and PyTorch, so you don't need to install Python. Use the `cu126` build if your NVIDIA driver is older than the 570 series. Extract it next to this repo, not inside it.
+2. `git clone` the three node packs into `ComfyUI/custom_nodes/`, then install the VideoHelperSuite dependencies with the bundled Python:
+   ```bash
+   python_embeded\python.exe -s -m pip install -r ComfyUI\custom_nodes\ComfyUI-VideoHelperSuite\requirements.txt
+   ```
+3. Put the models in these folders. The file names matter, because the IP-Adapter unified loader finds files by name pattern:
+
+   | Folder under `ComfyUI/models/` | File | Source |
+   | --- | --- | --- |
+   | `checkpoints/` | any SD1.5 checkpoint, e.g. `Realistic_Vision_V6.0_NV_B1_fp16.safetensors` | `SG161222/Realistic_Vision_V6.0_B1_noVAE` |
+   | `animatediff_models/` | `v3_sd15_mm.ckpt` | `guoyww/animatediff` |
+   | `ipadapter/` | `ip-adapter-plus-face_sd15.safetensors` | `h94/IP-Adapter` → `models/` |
+   | `clip_vision/` | `CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` (rename of `models/image_encoder/model.safetensors`) | `h94/IP-Adapter` |
+
+4. Start ComfyUI with live previews enabled:
+   ```bash
+   python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --preview-method auto
+   ```
+
+Reference timings on an RTX 4060: a 512×768 image takes about 5–8 s. A 16-frame 512×768 video with IP-Adapter takes about 60 s, or about 95 s on a cold start while models load.
+
+Notes:
+- `comfy-aimdo failed to load: [WinError 4551]` in the log means Windows Smart App Control blocked an optional memory-optimizer DLL. ComfyUI runs fine without it.
+- Realistic Vision often produces nudity when the prompt doesn't mention clothing. Describe the outfit, or add `nsfw, nude` to the negative prompt, when you want SFW output.
+
 ## Customizing
 
 - **Use your own workflow:** in ComfyUI, enable dev mode and choose *Save (API Format)*. Then rewrite `buildWorkflow()` to load that JSON and set your params on the right node IDs. You can use any graph (Flux, Wan, Hunyuan, LTX and so on). The streaming, previews and media proxy keep working unchanged.

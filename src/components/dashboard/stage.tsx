@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { JobState } from "@/hooks/use-generation";
+import { isBusy, type JobState } from "@/hooks/use-generation";
 import { cn } from "@/lib/utils";
 
 interface StageProps {
@@ -16,7 +16,7 @@ interface StageProps {
 
 /** The big canvas: empty state → queued → live latent previews + progress → final video/image. */
 export function Stage({ job, width, height }: StageProps) {
-  const busy = job.status === "submitting" || job.status === "queued" || job.status === "running";
+  const busy = isBusy(job.status);
   const result = job.results[0];
   const elapsed = useElapsed(busy ? job.startedAt : undefined);
   const pct = job.progress ? Math.round((job.progress.value / job.progress.max) * 100) : 0;
@@ -118,10 +118,10 @@ export function Stage({ job, width, height }: StageProps) {
               seed {job.seed}
             </Badge>
           )}
-          <Button variant="outline" size="sm" render={<a href={result.url} download={result.filename} />}>
+          <Button variant="outline" size="sm" nativeButton={false} render={<a href={result.url} download={result.filename} />}>
             <DownloadIcon /> Download
           </Button>
-          <Button variant="ghost" size="sm" render={<a href={result.url} target="_blank" rel="noreferrer" />}>
+          <Button variant="ghost" size="sm" nativeButton={false} render={<a href={result.url} target="_blank" rel="noreferrer" />}>
             <ExternalLinkIcon /> Open
           </Button>
         </div>
