@@ -406,38 +406,27 @@ function faceNode(g: Graph, face: ComfyFileRef): Link {
 }
 
 /**
- * ReActor pastes the first reference face onto every frame of `images`. Stills: CodeFormer restore on
- * paste, then (with `refine`) FaceDetailer re-samples the face region with the LoRA + FaceID model.
- * Clips: FaceBoost restores and upsamples the face crop *before* pasting (sharper than a 256 px
- * paste) and no per-frame re-sampling, so the face doesn't flicker.
+ * Clips only: ReActor pastes the first reference face onto every frame. FaceBoost restores and
+ * upsamples the face crop *before* pasting (sharper than a raw 256 px paste), and there is no per-frame
+ * re-sampling, which is what keeps the face from flickering. Photos never go through here.
  */
-function swapFace(
-  g: Graph,
-  p: GenerationParams,
-  input: BuildInput,
-  images: Link,
-  seed: number,
-  mode: { refine?: { c: Conditioned; model: Link } } | { boost: true },
-): Link {
+function swapFaceClip(g: Graph, input: BuildInput, images: Link): Link {
   const models = input.models;
   const face = faceNode(g, input.faces![0]);
-  const boost = "boost" in mode;
-  if (boost) {
-    g.add(
-      "83",
-      "ReActorFaceBoost",
-      {
-        enabled: true,
-        boost_model: models.faceRestore ?? "none",
-        interpolation: "Lanczos",
-        visibility: 1,
-        codeformer_weight: 0.5,
-        restore_with_main_after: false,
-      },
-      "Preparing face boost",
-    );
-  }
-  let out = g.add(
+  g.add(
+    "83",
+    "ReActorFaceBoost",
+    {
+      enabled: true,
+      boost_model: models.faceRestore ?? "none",
+      interpolation: "Lanczos",
+      visibility: 1,
+      codeformer_weight: 0.5,
+      restore_with_main_after: false,
+    },
+    "Preparing face boost",
+  );
+  return g.add(
     "80",
     "ReActorFaceSwap",
     {
@@ -445,7 +434,7 @@ function swapFace(
       input_image: images,
       swap_model: models.swapModel,
       facedetection: "retinaface_resnet50",
-      face_restore_model: boost ? "none" : (models.faceRestore ?? "none"),
+      face_restore_model: "none",
       face_restore_visibility: 1,
       codeformer_weight: 0.5,
       detect_gender_input: "no",
@@ -454,13 +443,10 @@ function swapFace(
       source_faces_index: "0",
       console_log_level: 1,
       source_image: face,
-      ...(boost && { face_boost: ["83", 0] }),
+      face_boost: ["83", 0],
     },
     "Swapping face",
   );
-  const refine = "refine" in mode ? mode.refine : undefined;
-  if (refine && models.faceDetector) out = faceDetailer(g, p, out, refine, seed, models.faceDetector);
-  return out;
 }
 
 /**
@@ -468,7 +454,15 @@ function swapFace(
  * `model` at refineDenoise and blends it back. Detail and likeness come from the model, so this is
  * also how the character's face is put on a still without any pixel paste.
  */
-function faceDetailer(g: Graph, p: GenerationParams, images: Link, refine: { c: Conditioned; model: Link }, seed: number, detector: string): Link {
+function faceDetailer(
+  g: Graph,
+  p: GenerationParams,
+  images: Link,
+  refine: { c: Conditioned; model: Link },
+  seed: number,
+  detector: string,
+  denoise = p.refineDenoise,
+): Link {
   g.add("81", "UltralyticsDetectorProvider", { model_name: detector }, "Loading face detector");
   return g.add(
     "82",
@@ -488,7 +482,7 @@ function faceDetailer(g: Graph, p: GenerationParams, images: Link, refine: { c: 
       scheduler: p.scheduler,
       positive: refine.c.positive,
       negative: refine.c.negative,
-      denoise: p.refineDenoise,
+      denoise,
       feather: 5,
       noise_mask: true,
       force_inpaint: true,
@@ -710,7 +704,12 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
   return wanSize;
 }
 
-/** Swaps the character's face into the source at its own resolution. */
+/**
+ * Puts the character's face into the source at its own resolution.
+ *   photo: FaceDetailer re-samples the face region with the LoRA + FaceID (0.85) at swapDenoise (~0.6):
+ *          enough to change who it is, while head position and lighting come from the photo. No ReActor.
+ *   clip:  ReActor + FaceBoost, the one flicker-free option until a VACE face-inpaint path exists.
+ */
 function buildFaceSwap(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const source = input.source!;
   const isVideo = source.kind === "video";
@@ -719,15 +718,12 @@ function buildFaceSwap(g: Graph, p: GenerationParams, input: BuildInput, seed: n
 
   let images: Link;
   if (isVideo) {
-    images = swapFace(g, p, input, src.frames, seed, { boost: true });
+    images = swapFaceClip(g, input, src.frames);
   } else {
-    let refine: { c: Conditioned; model: Link } | undefined;
-    if (p.refineFace && input.models.faceDetector) {
-      const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
-      const c = base(g, p, size, input.character);
-      refine = { c, model: applyFaceId(g, ["16", "17"], c.model, input.faces ?? [], REFINE_FACEID_WEIGHT, "Applying identity for the face refine") };
-    }
-    images = swapFace(g, p, input, src.frames, seed, { refine });
+    const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
+    const c = base(g, p, size, input.character);
+    const model = applyFaceId(g, ["16", "17"], c.model, input.faces ?? [], REFINE_FACEID_WEIGHT, "Applying identity for the face swap");
+    images = faceDetailer(g, p, src.frames, { c, model }, seed, input.models.faceDetector!, p.swapDenoise);
   }
   save(g, images, isVideo && { fps: src.fps!, audio: src.audio });
   return { width: 0, height: 0 };

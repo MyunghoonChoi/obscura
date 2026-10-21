@@ -54,7 +54,13 @@ export async function POST(req: Request) {
     // ── What this job needs, against what's installed ──
     const availability = await pipelineAvailability();
     const needs: Capability[] =
-      params.mode === "video" ? ["video"] : isFaceSwap ? ["faceswap"] : isRemix ? [source!.kind === "video" ? "motionVideo" : "motion"] : [];
+      params.mode === "video"
+        ? ["video"]
+        : isFaceSwap
+          ? [source!.kind === "video" ? "faceswap" : "faceswapPhoto"]
+          : isRemix
+            ? [source!.kind === "video" ? "motionVideo" : "motion"]
+            : [];
     for (const cap of needs) {
       const missing = availability.missing[cap];
       if (missing.length) return bad(`This ComfyUI is missing: ${missing.join("; ")}. Run setup_cloud.sh.`);
@@ -66,7 +72,6 @@ export async function POST(req: Request) {
       warnings.push(`Upscale skipped: missing ${availability.missing.upscale.join("; ")} (run setup_cloud.sh).`);
       params.upscale = 1;
     }
-    if (isFaceSwap && params.refineFace && !availability.refineAvailable) params.refineFace = false;
 
     // ── Identity: one-off face reference, or the character's LoRA + starred faces ──
     const faces: ComfyFileRef[] = [];
@@ -193,8 +198,8 @@ function sanitize(input: Partial<GenerationParams>): GenerationParams {
     faceRefine: p.faceRefine !== false,
     controlStrength: clamp(p.controlStrength, 0, 2, DEFAULT_PARAMS.controlStrength),
     denoise: clamp(p.denoise, 0.3, 1, 1),
-    refineFace: p.refineFace !== false,
     refineDenoise: clamp(p.refineDenoise, 0.1, 0.7, DEFAULT_PARAMS.refineDenoise),
+    swapDenoise: clamp(p.swapDenoise, 0.3, 0.85, DEFAULT_PARAMS.swapDenoise),
     remixFrameCap: Math.round(clamp(p.remixFrameCap, 0, FACESWAP_MAX_FRAMES, 0)),
     sourceWidth: Math.round(clamp(p.sourceWidth, 0, 8192, 0)),
     sourceHeight: Math.round(clamp(p.sourceHeight, 0, 8192, 0)),

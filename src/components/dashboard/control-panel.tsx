@@ -31,7 +31,7 @@ import { ParamSlider } from "./param-slider";
 import { ReferenceDrop } from "./reference-drop";
 import { SourceDrop, sourceKind } from "./source-drop";
 
-export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "upscale";
+export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "faceswapPhoto" | "upscale";
 
 export interface ComfyOptions {
   online: boolean;
@@ -53,7 +53,7 @@ const REMIX_MODES: Record<RemixMode, { label: string; hint: string }> = {
   },
   faceswap: {
     label: "Face swap",
-    hint: "Keeps the source exactly as filmed and puts your character's face in it.",
+    hint: "Keeps the source as filmed and puts your character's face in it. Photos: FaceDetailer re-samples the face with the LoRA + FaceID (no ReActor). Clips: ReActor + FaceBoost.",
   },
 };
 
@@ -95,8 +95,8 @@ export function ControlPanel({
   const isMotion = isRemix && p.remixMode === "motion";
   const sourceIsVideo = isRemix && sourceKind(source) === "video";
   const isVideo = p.mode === "video" || sourceIsVideo;
-  // Everything except face swap samples an SDXL still (face swap only when it refines a still).
-  const samples = !isFaceSwap || (p.refineFace && !sourceIsVideo);
+  // Everything samples with SDXL except face swap on a clip (ReActor only).
+  const samples = !isFaceSwap || !sourceIsVideo;
   const stillOutput = !isVideo && !isFaceSwap;
 
   const character = characters.find((c) => c.id === p.characterId);
@@ -105,7 +105,17 @@ export function ControlPanel({
   const resolution = RESOLUTIONS.find((r) => r.w === p.width && r.h === p.height)?.label ?? "custom";
 
   const capability: Capability | null =
-    p.mode === "video" ? "video" : isFaceSwap ? "faceswap" : isMotion ? (sourceIsVideo ? "motionVideo" : "motion") : null;
+    p.mode === "video"
+      ? "video"
+      : isFaceSwap
+        ? sourceIsVideo
+          ? "faceswap"
+          : "faceswapPhoto"
+        : isMotion
+          ? sourceIsVideo
+            ? "motionVideo"
+            : "motion"
+          : null;
   const missing = capability ? (options?.missing[capability] ?? []) : [];
   const upscaleMissing = options?.missing.upscale ?? [];
 
@@ -391,41 +401,23 @@ export function ControlPanel({
         )}
         {isFaceSwap && (
           <div className="space-y-3">
-            <label
-              className={cn(
-                "flex cursor-pointer items-center justify-between gap-3 text-xs",
-                (sourceIsVideo || !options?.refineAvailable) && "cursor-not-allowed opacity-50",
-              )}
-            >
-              <span>
-                Refine the face with the character LoRA
-                <span className="block text-[11px] text-muted-foreground">
-                  {sourceIsVideo
-                    ? "Clips use FaceBoost instead: the face is restored before pasting, with no per-frame re-sampling, so it doesn't flicker."
-                    : options?.refineAvailable
-                      ? "FaceDetailer redraws the swapped face for skin detail and likeness."
-                      : "Needs Impact Pack + a face detector (setup_cloud.sh)."}
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={p.refineFace && !sourceIsVideo && !!options?.refineAvailable}
-                disabled={sourceIsVideo || !options?.refineAvailable}
-                onChange={(e) => setParams({ refineFace: e.target.checked })}
-                className="size-4 accent-primary"
-              />
-            </label>
-            {samples && (
+            {!sourceIsVideo && (
               <ParamSlider
-                label="Refine strength"
-                hint="Denoise of the face refine pass. 0.3–0.45 adds detail without changing the swapped identity."
-                value={p.refineDenoise}
-                min={0.1}
-                max={0.7}
+                label="Face denoise"
+                hint="How far FaceDetailer may move from the photo's face. ~0.6 replaces the identity while keeping head position and lighting; lower keeps more of the original person, higher redraws the whole face region."
+                value={p.swapDenoise}
+                min={0.3}
+                max={0.85}
                 step={0.05}
                 format={(v) => v.toFixed(2)}
-                onChange={(refineDenoise) => setParams({ refineDenoise })}
+                onChange={(swapDenoise) => setParams({ swapDenoise })}
               />
+            )}
+            {sourceIsVideo && (
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Clips use ReActor + FaceBoost: the face is restored before pasting, with no per-frame re-sampling, so it
+                doesn&apos;t flicker. ReActor&apos;s own NSFW check applies here.
+              </p>
             )}
             {sourceIsVideo && (
               <ParamSlider

@@ -25,7 +25,7 @@ const OFFLINE: ComfyOptions = {
   defaultCheckpoint: "",
   samplers: [],
   schedulers: [],
-  missing: { video: [], motion: [], motionVideo: [], faceswap: [], upscale: [] },
+  missing: { video: [], motion: [], motionVideo: [], faceswap: [], faceswapPhoto: [], upscale: [] },
   refineAvailable: false,
 };
 

@@ -6,7 +6,7 @@ A private, self-hosted image and video studio that drives **your own ComfyUI** o
 - **Video**: that still becomes frame 1 of a **Wan 2.1 I2V 14B** clip at 720p / 16 fps
 - **Remix** a clip or photo:
   - **Motion transfer**: the source's pose (DWPose) drives a pose-locked still, and for clips **Wan 2.1 VACE 14B** follows the whole movement with that still as the reference
-  - **Face swap**: keep the source as filmed and put the character's face in (ReActor HyperSwap; FaceBoost on clips, FaceDetailer refine on stills)
+  - **Face swap**: keep the source as filmed and put the character's face in. Photos: FaceDetailer re-samples the face with the LoRA + FaceID (no ReActor). Clips: ReActor HyperSwap + FaceBoost
 - **Character library**: a dataset per character, one-click **SDXL LoRA training** (kohya), versioned LoRAs, *Add to dataset* on good results
 - Live previews, step progress, source audio kept on face-swap clips, history, optional Basic Auth, auto-deploy on push
 
@@ -62,8 +62,8 @@ motion · photo source (scaled + centre-cropped to the SDXL bucket) ─► DWPos
 motion · clip  source @16 fps ─► DWPose (whole clip) ─► WanVaceToVideo(control_video = pose, reference_image = pose-locked
                still of the character from frame 1, strength = Pose strength) ─► KSampler ─► TrimVideoLatent ─► MP4
 
-face swap      source ─► ReActor (HyperSwap 256 > reswapper > inswapper; clips: FaceBoost restore-before-paste,
-               stills: CodeFormer + FaceDetailer refine with the LoRA) ─► Save (source fps + audio kept on clips)
+face swap      photo ─► FaceDetailer (LoRA + FaceID 0.85, denoise 0.60) on the face region only ─► Save
+               clip  ─► ReActor (HyperSwap 256 > reswapper > inswapper) + FaceBoost restore-before-paste ─► Save (source fps + audio kept)
 ```
 
 Design decisions:
@@ -73,8 +73,8 @@ Design decisions:
 - **Upscaling resolves detail instead of inventing it**: 4x-UltraSharp enlarges, then UltimateSDUpscale re-samples 1024 px tiles at denoise 0.3 with the character model; the xinsir tile ControlNet (strength 0.5) keeps every tile faithful. 2× of 832×1216 ≈ 1664×2432.
 - **Pony** is a prompt style, not a separate graph: `score_9, score_8_up, score_7_up` / `score_6, score_5, score_4` and clip skip −2. The default checkpoint is Pony V6 XL when installed (`OBSCURA_DEFAULT_CHECKPOINT` overrides), never "whatever sorts first".
 - **Prompt parts stay separate** until the server joins them: `[style tags], [character trigger], [your prompt]`. Your text passes through verbatim, and the graph is serialized with `JSON.stringify`, so nothing in a prompt can break the request. Wan only receives your own text.
-- **ReActor is used by Remix › Face swap only.** Everywhere else the face pass is FaceDetailer: the face region is re-sampled at up to 1024 px with the LoRA model + its own FaceID (0.85) at denoise 0.40, so no 256 px paste touches the image. Temporal stability of swapped faces comes from ReActor applying one fixed identity embedding per frame with no sampling noise. FaceBoost restores and upsamples the face crop *before* pasting (sharper than a raw 256 px paste); FaceDetailer re-sampling every frame would flicker, so it runs on stills only. LivePortrait is not a swapper (it animates a portrait with a driving video) and isn't used.
-- **Known limits**: Wan 2.1 is a 2025 model, not magic: fast or complex motion can still warp hands and fabric, and VACE follows the pose, not the source's camera moves. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so; only Remix › Face swap uses ReActor), and flagged video frames are **dropped**, which shortens the clip and can desync audio. Face-swap clips are capped at 360 frames and 1920 px (VHS keeps every frame in RAM).
+- **ReActor is used by Remix › Face swap on clips only.** Everywhere else, photo face swaps included, the face pass is FaceDetailer: the face region is re-sampled at up to 1024 px with the LoRA model + its own FaceID (0.85) at denoise 0.40, so no 256 px paste touches the image. Temporal stability of swapped faces comes from ReActor applying one fixed identity embedding per frame with no sampling noise. FaceBoost restores and upsamples the face crop *before* pasting (sharper than a raw 256 px paste); FaceDetailer re-sampling every frame would flicker, so it runs on stills only. LivePortrait is not a swapper (it animates a portrait with a driving video) and isn't used.
+- **Known limits**: Wan 2.1 is a 2025 model, not magic: fast or complex motion can still warp hands and fabric, and VACE follows the pose, not the source's camera moves. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so; only clip face swaps use ReActor), and flagged video frames are **dropped**, which shortens the clip and can desync audio. Face-swap clips are capped at 360 frames and 1920 px (VHS keeps every frame in RAM).
 
 ## Character LoRAs
 

@@ -52,10 +52,10 @@ export interface GenerationParams {
   controlStrength: number;
   /** Motion transfer on a still ("New look"): 1 = redraw everything from the prompt; ~0.55 keeps the source's composition and lighting and changes outfit/background to taste. */
   denoise: number;
-  /** Face swap: refine the swapped face with the character LoRA + FaceID (stills only, see workflow.ts). */
-  refineFace: boolean;
-  /** Denoise of every FaceDetailer pass (face refine on stills, face-swap refine). */
+  /** Denoise of the face refine pass (Image / Video / Motion transfer): keeps the face, sharpens the likeness. */
   refineDenoise: number;
+  /** Denoise of the photo face swap (FaceDetailer replacing the identity): high enough to change who it is, ~0.6. */
+  swapDenoise: number;
   /** Face-swap video: frames read from the source. 0 = the whole clip, up to FACESWAP_MAX_FRAMES. */
   remixFrameCap: number;
   /** Source dimensions as measured by the browser; used to pick the output bucket. */
@@ -108,8 +108,8 @@ export const DEFAULT_PARAMS: GenerationParams = {
   remixMode: "motion",
   controlStrength: 0.85,
   denoise: 0.55,
-  refineFace: true,
   refineDenoise: 0.4,
+  swapDenoise: 0.6,
   remixFrameCap: 0,
   sourceWidth: 0,
   sourceHeight: 0,

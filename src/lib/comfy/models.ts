@@ -69,7 +69,7 @@ const best = (options: string[], ...preferences: RegExp[]) => {
   return undefined;
 };
 
-export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "upscale";
+export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "faceswapPhoto" | "upscale";
 
 export interface PipelineAvailability {
   models: PipelineModels;
@@ -129,8 +129,14 @@ export async function pipelineAvailability(): Promise<PipelineAvailability> {
   if (!nodes.WanVaceToVideo) motionVideo.push("a ComfyUI with native Wan VACE nodes (update ComfyUI)");
   if (!models.wanVace) motionVideo.push("wan2.1_vace_14B (models/diffusion_models)");
 
+  // Clips swap with ReActor; photos re-sample the face with FaceDetailer + FaceID (no ReActor involved).
   const faceswap: string[] = [];
   if (!models.swapModel) faceswap.push("ComfyUI-ReActor with a swap model (models/hyperswap, reswapper or insightface)");
+  if (!nodes.ReActorFaceBoost) faceswap.push("ComfyUI-ReActor (FaceBoost)");
+  const faceswapPhoto: string[] = [];
+  if (!nodes.FaceDetailer) faceswapPhoto.push("ComfyUI-Impact-Pack (FaceDetailer)");
+  if (!models.faceDetector) faceswapPhoto.push("models/ultralytics/bbox/face_yolov8m.pt");
+  if (!nodes.IPAdapterUnifiedLoaderFaceID) faceswapPhoto.push("ComfyUI_IPAdapter_plus (FaceID)");
 
   const upscale: string[] = [];
   if (!nodes.UltimateSDUpscale) upscale.push("ComfyUI_UltimateSDUpscale");
@@ -138,7 +144,7 @@ export async function pipelineAvailability(): Promise<PipelineAvailability> {
 
   return {
     models,
-    missing: { video, motion, motionVideo, faceswap, upscale },
-    refineAvailable: !!(nodes.FaceDetailer && nodes.IPAdapterUnifiedLoaderFaceID && models.faceDetector),
+    missing: { video, motion, motionVideo, faceswap, faceswapPhoto, upscale },
+    refineAvailable: faceswapPhoto.length === 0,
   };
 }
