@@ -78,7 +78,7 @@ export type JobEvent =
   | { type: "executing"; node: string; nodeType?: string }
   | { type: "progress"; value: number; max: number; node?: string }
   | { type: "preview"; dataUrl: string }
-  | { type: "done"; results: GenerationResult[] }
+  | { type: "done"; results: GenerationResult[]; warnings?: string[] }
   | { type: "error"; message: string };
 
 export const DEFAULT_PARAMS: GenerationParams = {

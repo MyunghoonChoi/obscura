@@ -124,6 +124,7 @@ export function useGeneration() {
             es.close();
             store(ACTIVE_KEY, null);
             setJob((j) => ({ ...j, status: "done", results: ev.results, stage: undefined }));
+            ev.warnings?.forEach((w) => toast.warning(w, { duration: 10000 }));
             setViewing(null); // jump to the fresh result
             if (ev.results.length)
               pushHistory({

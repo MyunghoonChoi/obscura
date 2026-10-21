@@ -1,6 +1,8 @@
 import "server-only";
 
-import { getHistory, getQueuePosition, openSocket, type HistoryEntry } from "./client";
+import sharp from "sharp";
+
+import { getHistory, getQueuePosition, openSocket, viewFile, type HistoryEntry } from "./client";
 import type { GenerationResult, JobEvent } from "./types";
 
 const POLL_MS = 2000; // history polling — the safety net if the socket drops
@@ -62,7 +64,8 @@ export function jobEventStream(promptId: string, clientId: string, signal: Abort
         if (entry.status?.status_str === "error") {
           send({ type: "error", message: historyErrorMessage(entry) });
         } else {
-          send({ type: "done", results: extractResults(entry) });
+          const results = extractResults(entry);
+          send({ type: "done", results, warnings: await blankResultWarnings(results) });
         }
         finish();
         return true;
@@ -194,6 +197,26 @@ export function extractResults(entry: HistoryEntry): GenerationResult[] {
   }
   // VHS can also save a PNG with workflow metadata alongside the video; prefer the video.
   return results.some((r) => r.kind === "video") ? results.filter((r) => r.kind === "video") : results;
+}
+
+/**
+ * ReActor replaces any still its NSFW check flags with a black frame and only logs it server-side,
+ * so an all-black result is reported to the user here instead of leaving them guessing.
+ */
+async function blankResultWarnings(results: GenerationResult[]): Promise<string[] | undefined> {
+  for (const r of results.filter((x) => x.kind === "image").slice(0, 3)) {
+    try {
+      const res = await viewFile(r);
+      const { channels } = await sharp(Buffer.from(await res.arrayBuffer())).stats();
+      if (channels.every((c) => c.mean < 4))
+        return [
+          'The image came back black: ReActor\'s NSFW check blanked it. Turn off "Finish with a face swap" for this render, or use a different Remix source.',
+        ];
+    } catch {
+      // Not fatal: the result still shows; only the explanation is lost.
+    }
+  }
+  return undefined;
 }
 
 function historyErrorMessage(entry: HistoryEntry): string {
