@@ -20,6 +20,7 @@
 #   WITH_PONY=1         also fetch Pony Diffusion V6 XL (Civitai)
 #   HOTSHOT=1           also fetch HotshotXL (8-frame SDXL motion module)
 #   START=1             launch ComfyUI (127.0.0.1:8188) + dashboard (0.0.0.0:3000) when done
+#   AUTO_UPDATE=1       also run update_obscura.sh --watch: redeploys the dashboard ~2 min after a push
 set -euo pipefail
 
 WORKSPACE=${WORKSPACE:-/workspace}
@@ -172,16 +173,84 @@ EOF
 fi
 (cd "$APP" && npm ci --no-audit --no-fund --loglevel=error && npm run build)
 
-# ── Launcher ────────────────────────────────────────────────────────────────
+# ── Launcher + updater ──────────────────────────────────────────────────────
 HIGHVRAM=""; [ "${VRAM_MB:-0}" -ge 40000 ] && HIGHVRAM="--highvram" # keep every model resident on 40 GB+ cards
-cat > "$WORKSPACE/start_obscura.sh" <<EOF
-#!/usr/bin/env bash
-# Starts ComfyUI (private, 127.0.0.1:8188) and the dashboard (0.0.0.0:3000). Logs go to $LOGS.
-cd "$COMFY" && nohup "$CPY" main.py --listen 127.0.0.1 --port 8188 --preview-method auto $HIGHVRAM > "$LOGS/comfyui.log" 2>&1 &
-cd "$APP" && nohup npm start -- -H 0.0.0.0 -p 3000 > "$LOGS/dashboard.log" 2>&1 &
-echo "ComfyUI → $LOGS/comfyui.log · dashboard → http://<pod>:3000 ($LOGS/dashboard.log)"
+
+# Writes start_obscura.sh and update_obscura.sh into $WORKSPACE. Paths are baked in as a header;
+# the bodies are quoted heredocs, so $vars in them are evaluated when the scripts run.
+write_launchers() {
+  local header
+  header=$(printf 'WORKSPACE=%q\nCOMFY=%q\nAPP=%q\nLOGS=%q\nCPY=%q\nHIGHVRAM=%q\n' "$WORKSPACE" "$COMFY" "$APP" "$LOGS" "$CPY" "$HIGHVRAM")
+
+  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
+# Starts or restarts ComfyUI (127.0.0.1:8188), the dashboard (0.0.0.0:3000) and the auto-updater.
+#   start_obscura.sh            everything (running instances are stopped first; a render in progress dies)
+#   start_obscura.sh dashboard  only the dashboard (what the updater does after a rebuild)
+# AUTO_UPDATE=0 disables the updater. Logs: $LOGS/*.log
+set -u
+what=${1:-all}
+mkdir -p "$LOGS"
+# Each service runs in its own session (setsid), so killing the group also gets npm's next-server child.
+stop() {
+  local f=$LOGS/$1.pid
+  if [ -f "$f" ]; then kill -- -"$(cat "$f")" 2>/dev/null; sleep 1; fi
+  rm -f "$f"
+}
+launch() { # launch <name> <dir> <command...>
+  local name=$1 dir=$2; shift 2
+  (cd "$dir" && setsid nohup "$@" > "$LOGS/$name.log" 2>&1 & echo $! > "$LOGS/$name.pid")
+}
+if [ "$what" = all ]; then
+  stop updater; stop dashboard; stop comfyui
+  launch comfyui "$COMFY" "$CPY" main.py --listen 127.0.0.1 --port 8188 --preview-method auto $HIGHVRAM
+  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
+  if [ "${AUTO_UPDATE:-1}" = 1 ]; then launch updater "$WORKSPACE" "$WORKSPACE/update_obscura.sh" --watch; fi
+  echo "ComfyUI → $LOGS/comfyui.log · dashboard → http://<pod>:3000 ($LOGS/dashboard.log) · updater → $LOGS/updater.log"
+else
+  stop dashboard
+  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
+fi
 EOF
-chmod +x "$WORKSPACE/start_obscura.sh"
+  } > "$WORKSPACE/start_obscura.sh"
+
+  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
+# Pulls origin/main and, when it moved, rebuilds and restarts the dashboard only (ComfyUI and any
+# render in progress keep running). A failed build puts the previous build back.
+#   update_obscura.sh          once
+#   update_obscura.sh --watch  every 2 minutes (start_obscura.sh runs this unless AUTO_UPDATE=0)
+set -u
+stamp() { date '+%F %T'; }
+update() {
+  cd "$APP" || return 1
+  git fetch -q origin main 2>/dev/null || { echo "$(stamp) fetch failed"; return 1; }
+  local here there; here=$(git rev-parse HEAD); there=$(git rev-parse origin/main)
+  [ "$here" = "$there" ] && return 0
+  echo "$(stamp) updating ${here:0:7} → ${there:0:7}"
+  git merge -q --ff-only origin/main || { echo "$(stamp) not a fast-forward; fix the clone by hand"; return 1; }
+  rm -rf .next.prev; [ -d .next ] && cp -a .next .next.prev
+  if git diff --name-only "$here" "$there" | grep -q '^package-lock.json$'; then
+    npm ci --no-audit --no-fund --loglevel=error || { echo "$(stamp) npm ci failed"; return 1; }
+  fi
+  if npm run build; then
+    rm -rf .next.prev
+    "$WORKSPACE/start_obscura.sh" dashboard && echo "$(stamp) dashboard restarted at ${there:0:7}"
+  else
+    echo "$(stamp) build failed; restoring the previous build"
+    rm -rf .next; [ -d .next.prev ] && mv .next.prev .next
+    "$WORKSPACE/start_obscura.sh" dashboard
+    return 1
+  fi
+}
+if [ "${1:-}" = --watch ]; then
+  while true; do update; sleep 120; done
+else
+  update
+fi
+EOF
+  } > "$WORKSPACE/update_obscura.sh"
+  chmod +x "$WORKSPACE/start_obscura.sh" "$WORKSPACE/update_obscura.sh"
+}
+write_launchers
 
 log "Done"
 echo "Expose port 3000 only (RunPod: https://<pod-id>-3000.proxy.runpod.net; add it as a direct TCP port too for uploads over ~100 MB). ComfyUI stays on localhost."
