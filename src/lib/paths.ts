@@ -15,7 +15,9 @@ import path from "node:path";
  * Training writes LoRAs straight into ComfyUI's models/loras, so it only works when
  * ComfyUI runs on the same box. Generation with already-trained characters works anywhere.
  */
-const fromEnv = (name: string, fallback: string) => path.resolve(process.cwd(), process.env[name] || fallback);
+// turbopackIgnore: these are runtime paths, not files to bundle; without it the build traces the whole project.
+const fromEnv = (name: string, fallback: string) =>
+  path.resolve(/* turbopackIgnore: true */ process.cwd(), process.env[name] || fallback);
 
 export const DATA_DIR = fromEnv("OBSCURA_DATA_DIR", "../characters");
 export const COMFY_DIR = fromEnv("COMFY_DIR", "../ComfyUI");

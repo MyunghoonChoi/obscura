@@ -191,9 +191,12 @@ set -u
 what=${1:-all}
 mkdir -p "$LOGS"
 # Each service runs in its own session (setsid), so killing the group also gets npm's next-server child.
-stop() {
+# The pattern catches instances started some other way (an older launcher, or by hand).
+stop() { # stop <name> <pkill pattern>
   local f=$LOGS/$1.pid
-  if [ -f "$f" ]; then kill -- -"$(cat "$f")" 2>/dev/null; sleep 1; fi
+  if [ -f "$f" ]; then kill -- -"$(cat "$f")" 2>/dev/null; fi
+  pkill -f "$2" 2>/dev/null
+  sleep 1
   rm -f "$f"
 }
 launch() { # launch <name> <dir> <command...>
@@ -201,13 +204,13 @@ launch() { # launch <name> <dir> <command...>
   (cd "$dir" && setsid nohup "$@" > "$LOGS/$name.log" 2>&1 & echo $! > "$LOGS/$name.pid")
 }
 if [ "$what" = all ]; then
-  stop updater; stop dashboard; stop comfyui
+  stop updater "update_obscura.sh --watch"; stop dashboard "next start|next-server"; stop comfyui "ComfyUI/main.py"
   launch comfyui "$COMFY" "$CPY" main.py --listen 127.0.0.1 --port 8188 --preview-method auto $HIGHVRAM
   launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
   if [ "${AUTO_UPDATE:-1}" = 1 ]; then launch updater "$WORKSPACE" "$WORKSPACE/update_obscura.sh" --watch; fi
   echo "ComfyUI → $LOGS/comfyui.log · dashboard → http://<pod>:3000 ($LOGS/dashboard.log) · updater → $LOGS/updater.log"
 else
-  stop dashboard
+  stop dashboard "next start|next-server"
   launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
 fi
 EOF
