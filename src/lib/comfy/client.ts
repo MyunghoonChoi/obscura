@@ -42,11 +42,12 @@ export class ComfyError extends Error {
 }
 
 /** POST /upload/image — stores the reference image in ComfyUI's input folder. */
-export async function uploadImage(file: File): Promise<ComfyFileRef> {
+export async function uploadImage(file: File, subfolder?: string): Promise<ComfyFileRef> {
   const form = new FormData();
   form.append("image", file, file.name || "reference.png");
   form.append("type", "input");
   form.append("overwrite", "true");
+  if (subfolder) form.append("subfolder", subfolder);
   const res = await comfyFetch("/upload/image", { method: "POST", body: form });
   const json = (await res.json()) as { name: string; subfolder: string; type: "input" };
   return { filename: json.name, subfolder: json.subfolder ?? "", type: json.type ?? "input" };
@@ -109,6 +110,15 @@ export async function listNodeOptions(nodeClass: string, input: string): Promise
   } catch {
     return []; // node pack not installed or server offline
   }
+}
+
+/** POST /free — unloads models from VRAM so the LoRA trainer gets the whole card. */
+export async function freeMemory(): Promise<void> {
+  await comfyFetch("/free", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ unload_models: true, free_memory: true }),
+  });
 }
 
 /** GET /view — raw file stream; Range is forwarded so <video> can seek. */

@@ -1,6 +1,7 @@
 "use client";
 
-import { ClapperboardIcon, DicesIcon, ImageIcon, SparklesIcon, SquareIcon } from "lucide-react";
+import { ClapperboardIcon, DicesIcon, GraduationCapIcon, ImageIcon, SparklesIcon, SquareIcon, UserRoundIcon } from "lucide-react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,28 +10,38 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { trainedCheckpoint } from "@/lib/characters/api";
+import type { CharacterSummary, TrainingStatus } from "@/lib/characters/types";
+import {
+  ARCHITECTURES,
+  motionArchitecture,
+  paramsForArchitecture,
+  paramsForCheckpoint,
+  PROMPT_STYLES,
+  VRAM_LIMITS,
+  type Architecture,
+  type PromptStyle,
+  type VramProfile,
+} from "@/lib/comfy/architectures";
 import type { GenerationMode, GenerationParams } from "@/lib/comfy/types";
+import { cn } from "@/lib/utils";
 
+import { CharacterPhotos } from "./character-photos";
 import { ParamSlider } from "./param-slider";
 import { ReferenceDrop } from "./reference-drop";
 
 export interface ComfyOptions {
   online: boolean;
+  /** VRAM class of the ComfyUI host (server env), which caps frames and SDXL video. */
+  vramProfile: VramProfile;
   checkpoints: string[];
+  /** Detected per checkpoint on the server (safetensors header), so picking one switches the graph family. */
+  checkpointArchitectures: Record<string, Architecture>;
   motionModules: string[];
   samplers: string[];
   schedulers: string[];
   ipAdapterPresets: string[];
 }
-
-const RESOLUTIONS = [
-  { label: "Portrait 2:3", w: 512, h: 768 },
-  { label: "Square 1:1", w: 512, h: 512 },
-  { label: "Landscape 3:2", w: 768, h: 512 },
-  { label: "Wide 16:9", w: 912, h: 512 },
-  { label: "Tall 9:16", w: 512, h: 912 },
-  { label: "SDXL 1:1", w: 1024, h: 1024 },
-];
 
 interface ControlPanelProps {
   params: GenerationParams;
@@ -38,6 +49,11 @@ interface ControlPanelProps {
   reference: File | null;
   setReference: (file: File | null) => void;
   options: ComfyOptions | null;
+  characters: CharacterSummary[];
+  /** A LoRA run holds the GPU, so generating is paused. */
+  training: TrainingStatus | null;
+  /** Refetch the library after photos are added from the studio. */
+  onCharactersChanged: () => void;
   busy: boolean;
   onGenerate: () => void;
   onCancel: () => void;
@@ -49,12 +65,23 @@ export function ControlPanel({
   reference,
   setReference,
   options,
+  characters,
+  training,
+  onCharactersChanged,
   busy,
   onGenerate,
   onCancel,
 }: ControlPanelProps) {
   const isVideo = p.mode === "video";
-  const resolution = RESOLUTIONS.find((r) => r.w === p.width && r.h === p.height)?.label ?? "custom";
+  const character = characters.find((c) => c.id === p.characterId);
+  // Starred dataset images stand in for a manual reference when a character is picked.
+  const characterRefs = !reference && !!character && p.useCharacterRefs && character.refs.length > 0;
+  const hasReference = !!reference || characterRefs;
+  const resolutions = ARCHITECTURES[p.architecture].resolutions;
+  const resolution = resolutions.find((r) => r.w === p.width && r.h === p.height)?.label ?? "custom";
+  const motionModules = (options?.motionModules ?? []).filter((m) => motionArchitecture(m) === p.architecture);
+  const maxFrames = VRAM_LIMITS[options?.vramProfile ?? "low"].maxFrames;
+  const archDependent = { width: p.width, height: p.height, promptStyle: p.promptStyle, motionModule: p.motionModule };
 
   return (
     <div className="flex flex-col gap-5">
@@ -96,9 +123,99 @@ export function ControlPanel({
       </div>
 
       <div className="space-y-2">
-        <Label className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Character reference</Label>
+        <div className="flex items-center justify-between">
+          <Label className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Character</Label>
+          <Link href="/characters" className="text-xs text-muted-foreground hover:text-foreground">
+            Manage characters →
+          </Link>
+        </div>
+        <CharacterSelect
+          characters={characters}
+          value={p.characterId}
+          onChange={(id) => {
+            const c = characters.find((x) => x.id === id);
+            const checkpoint = trainedCheckpoint(c, options?.checkpoints ?? []);
+            setParams({
+              characterId: id,
+              loraStrength: c?.loraStrength ?? p.loraStrength,
+              // A trained LoRA carries the identity on its own; IP-Adapter on top tends to override outfits and scenes.
+              useCharacterRefs: !c?.activeVersion,
+              ...(checkpoint &&
+                paramsForCheckpoint(checkpoint, options?.checkpointArchitectures ?? {}, archDependent, options?.motionModules ?? [])),
+            });
+          }}
+        />
+        {!character && (
+          <p className="rounded-lg border border-dashed border-border px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            {characters.length ? "Pick a character" : "Create a character"} to use many reference photos, train a LoRA on
+            them and keep adding your best results.{" "}
+            <Link href="/characters" className="text-primary hover:underline">
+              {characters.length ? "All characters →" : "New character →"}
+            </Link>
+          </p>
+        )}
+        {character && (
+          <div className="space-y-4 rounded-xl border border-border bg-muted/20 p-3">
+            <CharacterPhotos character={character} onAdded={onCharactersChanged} />
+            <p className="text-xs text-muted-foreground">
+              {character.activeVersion ? (
+                <>
+                  LoRA <b className="text-foreground">v{character.activeVersion}</b> is applied and{" "}
+                  <code className="font-mono">{character.trigger}</code> is added to your prompt.
+                </>
+              ) : (
+                <>
+                  No LoRA trained yet. The face comes from{" "}
+                  {character.refs.length ? `${Math.min(4, character.refs.length)} starred image(s)` : "a reference"} via
+                  IP-Adapter.{" "}
+                  <Link href={`/characters/${character.id}`} className="text-primary hover:underline">
+                    Train v1 →
+                  </Link>
+                </>
+              )}
+            </p>
+            {!!character.activeVersion && (
+              <ParamSlider
+                label="LoRA strength"
+                hint="How strongly the character LoRA applies. 0.7–0.9 is typical; raise it if the face drifts, lower it if everything looks over-baked."
+                value={p.loraStrength}
+                min={0}
+                max={1.5}
+                step={0.05}
+                format={(v) => v.toFixed(2)}
+                onChange={(loraStrength) => setParams({ loraStrength })}
+              />
+            )}
+            {character.refs.length > 0 && (
+              <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
+                <span>
+                  Also lock the face with starred images
+                  <span className="block text-[11px] text-muted-foreground">
+                    IP-Adapter on {Math.min(4, character.refs.length)} image(s).{" "}
+                    {character.activeVersion
+                      ? "Optional with a LoRA: steadier face, but it can override outfits and scenes."
+                      : "A manual reference below replaces them."}
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={p.useCharacterRefs}
+                  onChange={(e) => setParams({ useCharacterRefs: e.target.checked })}
+                  className="size-4 accent-primary"
+                />
+              </label>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <Label className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          {character ? "One-off face override" : "One-off face reference"}
+        </Label>
+        <p className="-mt-1 text-[11px] text-muted-foreground">One image, used for this render only and not saved to a character.</p>
         <ReferenceDrop file={reference} onChange={setReference} />
-        {reference && (
+        {hasReference && (
           <ParamSlider
             label="Identity strength"
             hint="IP-Adapter weight. ~0.7–1.0 keeps the face locked; higher values can over-bake the reference's pose and lighting."
@@ -143,7 +260,7 @@ export function ControlPanel({
           step={0.01}
           format={(v) => v.toFixed(2)}
           onChange={(denoise) => setParams({ denoise })}
-          disabled={!reference}
+          disabled={!hasReference}
         />
         {isVideo && (
           <div className="grid grid-cols-2 gap-4">
@@ -152,7 +269,7 @@ export function ControlPanel({
               hint="Total frames. >16 uses sliding context windows, so length is limited by VRAM and time, not the motion model."
               value={p.frames}
               min={8}
-              max={96}
+              max={maxFrames}
               step={8}
               onChange={(frames) => setParams({ frames })}
             />
@@ -177,15 +294,54 @@ export function ControlPanel({
             value={p.checkpoint}
             items={options?.checkpoints ?? []}
             placeholder="No checkpoints found"
-            onChange={(checkpoint) => setParams({ checkpoint })}
+            onChange={(checkpoint) =>
+              setParams(
+                paramsForCheckpoint(checkpoint, options?.checkpointArchitectures ?? {}, archDependent, options?.motionModules ?? []),
+              )
+            }
           />
+        </Field>
+        <Field label="Architecture">
+          <Select
+            value={p.architecture}
+            onValueChange={(v) =>
+              v && setParams(paramsForArchitecture(v as Architecture, archDependent, options?.motionModules ?? []))
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue>{ARCHITECTURES[p.architecture].label}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(ARCHITECTURES) as Architecture[]).map((a) => (
+                <SelectItem key={a} value={a}>
+                  {ARCHITECTURES[a].label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Prompt style">
+          <Select value={p.promptStyle} onValueChange={(v) => v && setParams({ promptStyle: v as PromptStyle })}>
+            <SelectTrigger className="w-full">
+              <SelectValue>{PROMPT_STYLES[p.promptStyle].label}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(PROMPT_STYLES) as PromptStyle[])
+                .filter((s) => PROMPT_STYLES[s].architectures.includes(p.architecture))
+                .map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {PROMPT_STYLES[s].label}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
         </Field>
         {isVideo && (
           <Field label="Motion module" className="col-span-2">
             <OptionSelect
-              value={p.motionModule}
-              items={options?.motionModules ?? []}
-              placeholder="AnimateDiff not installed"
+              value={motionModules.includes(p.motionModule) ? p.motionModule : ""}
+              items={motionModules}
+              placeholder={`No ${ARCHITECTURES[p.architecture].label} motion module installed`}
               onChange={(motionModule) => setParams({ motionModule })}
             />
           </Field>
@@ -194,7 +350,7 @@ export function ControlPanel({
           <Select
             value={resolution}
             onValueChange={(v) => {
-              const r = RESOLUTIONS.find((x) => x.label === v);
+              const r = resolutions.find((x) => x.label === v);
               if (r) setParams({ width: r.w, height: r.h });
             }}
           >
@@ -202,7 +358,7 @@ export function ControlPanel({
               <SelectValue>{resolution === "custom" ? `${p.width}×${p.height}` : resolution}</SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {RESOLUTIONS.map((r) => (
+              {resolutions.map((r) => (
                 <SelectItem key={r.label} value={r.label}>
                   {r.label} <span className="text-muted-foreground">{r.w}×{r.h}</span>
                 </SelectItem>
@@ -217,7 +373,7 @@ export function ControlPanel({
             onChange={(sampler) => setParams({ sampler })}
           />
         </Field>
-        {reference && (
+        {hasReference && (
           <Field label="IP-Adapter preset" className="col-span-2">
             <OptionSelect
               value={p.ipAdapterPreset}
@@ -249,6 +405,19 @@ export function ControlPanel({
       </div>
 
       <div className="sticky bottom-0 -mx-5 mt-auto border-t border-border bg-card/90 px-5 pt-4 pb-5 backdrop-blur">
+        {training && !busy && (
+          <Link
+            href={`/characters/${training.characterId}`}
+            className="mb-3 flex items-center gap-2 rounded-lg border border-fuchsia-500/30 bg-fuchsia-500/10 px-3 py-2 text-xs text-fuchsia-200 hover:bg-fuchsia-500/15"
+          >
+            <GraduationCapIcon className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">
+              Training {characters.find((c) => c.id === training.characterId)?.name ?? training.characterId} v{training.version}
+              {training.totalSteps ? ` · ${Math.round((training.step / training.totalSteps) * 100)}%` : "…"}. Generating is
+              paused until it finishes.
+            </span>
+          </Link>
+        )}
         {busy ? (
           <Button variant="secondary" className="h-11 w-full" onClick={onCancel}>
             <SquareIcon className="fill-current" /> Stop render
@@ -257,7 +426,7 @@ export function ControlPanel({
           <Button
             className="h-11 w-full bg-linear-to-r from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-500/20 hover:opacity-90"
             onClick={onGenerate}
-            disabled={!options?.online}
+            disabled={!options?.online || !!training}
           >
             <SparklesIcon /> Generate {isVideo ? "video" : "image"}
             <kbd className="ml-auto hidden rounded bg-white/20 px-1.5 font-mono text-[10px] sm:inline">Ctrl ↵</kbd>
@@ -265,6 +434,56 @@ export function ControlPanel({
         )}
       </div>
     </div>
+  );
+}
+
+function CharacterSelect({
+  characters,
+  value,
+  onChange,
+}: {
+  characters: CharacterSummary[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  const current = characters.find((c) => c.id === value);
+  return (
+    <Select value={value || NONE} onValueChange={(v) => onChange(v === NONE || !v ? "" : String(v))}>
+      <SelectTrigger className="w-full min-w-0">
+        <SelectValue>
+          {current ? <CharacterOption c={current} /> : <span className="text-muted-foreground">None (prompt only)</span>}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NONE}>None (prompt only)</SelectItem>
+        {characters.map((c) => (
+          <SelectItem key={c.id} value={c.id}>
+            <CharacterOption c={c} />
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+const NONE = "__none";
+
+function CharacterOption({ c }: { c: CharacterSummary }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="grid size-5 shrink-0 place-items-center overflow-hidden rounded bg-muted">
+        {c.coverUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- local dataset file
+          <img src={c.coverUrl} alt="" className="size-full object-cover object-top" />
+        ) : (
+          <UserRoundIcon className="size-3 text-muted-foreground" />
+        )}
+      </span>
+      <span className="truncate">{c.name}</span>
+      <span className={cn("shrink-0 font-mono text-[10px]", c.activeVersion ? "text-primary" : "text-muted-foreground")}>
+        {c.activeVersion ? `v${c.activeVersion}` : "no LoRA"}
+      </span>
+    </span>
   );
 }
 

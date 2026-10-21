@@ -89,7 +89,7 @@ export function ReferenceDrop({ file, onChange }: ReferenceDropProps) {
           <p className="text-sm">
             <span className="font-medium text-foreground">Drop a face reference</span> or click / paste
           </p>
-          <p className="text-xs">Clear, front-facing portrait works best</p>
+          <p className="text-xs">One clear, front-facing portrait</p>
         </div>
       )}
     </div>

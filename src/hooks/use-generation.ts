@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import type { GenerationParams, GenerationResult, JobEvent } from "@/lib/comfy/types";
 
@@ -13,6 +14,8 @@ export interface HistoryItem {
   seed: number;
   createdAt: number;
   results: GenerationResult[];
+  /** Character the render was made with, so its result can go back into that dataset. */
+  characterId?: string;
 }
 
 export interface JobState {
@@ -27,6 +30,7 @@ export interface JobState {
   error?: string;
   startedAt?: number;
   seed?: number;
+  characterId?: string;
 }
 
 /** Everything needed to (re)attach to a job's event stream — persisted so a page reload can resume it. */
@@ -38,6 +42,7 @@ interface ActiveJob {
   prompt: string;
   mode: GenerationParams["mode"];
   startedAt: number;
+  characterId?: string;
 }
 
 const HISTORY_KEY = "obscura:history";
@@ -88,7 +93,14 @@ export function useGeneration() {
     (active: ActiveJob) => {
       sourceRef.current?.close();
       store(ACTIVE_KEY, active);
-      setJob({ ...IDLE, status: "queued", promptId: active.promptId, seed: active.seed, startedAt: active.startedAt });
+      setJob({
+        ...IDLE,
+        status: "queued",
+        promptId: active.promptId,
+        seed: active.seed,
+        startedAt: active.startedAt,
+        characterId: active.characterId,
+      });
 
       const es = new EventSource(`/api/jobs/${active.promptId}/stream?clientId=${active.clientId}`);
       sourceRef.current = es;
@@ -121,6 +133,7 @@ export function useGeneration() {
                 seed: active.seed,
                 createdAt: Date.now(),
                 results: ev.results,
+                characterId: active.characterId,
               });
             break;
           case "error":
@@ -159,7 +172,21 @@ export function useGeneration() {
         const res = await fetch("/api/generate", { method: "POST", body });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-        follow({ ...data, prompt: params.prompt, mode: params.mode, startedAt });
+        const { promptId, clientId, labels, seed, warnings } = data as Pick<ActiveJob, "promptId" | "clientId" | "labels" | "seed"> & {
+          warnings?: string[];
+        };
+        // e.g. a character LoRA skipped because it was trained for another architecture.
+        warnings?.forEach((w) => toast.warning(w));
+        follow({
+          promptId,
+          clientId,
+          labels,
+          seed,
+          prompt: params.prompt,
+          mode: params.mode,
+          startedAt,
+          characterId: params.characterId || undefined,
+        });
       } catch (err) {
         setJob((j) => ({ ...j, status: "error", error: (err as Error).message }));
       }
@@ -183,7 +210,7 @@ export function useGeneration() {
 
   /** What the stage should render: the history item being viewed, else the live job. */
   const display: JobState = viewing
-    ? { ...IDLE, status: "done", results: viewing.results, seed: viewing.seed, promptId: viewing.id }
+    ? { ...IDLE, status: "done", results: viewing.results, seed: viewing.seed, promptId: viewing.id, characterId: viewing.characterId }
     : job;
 
   return { job, display, viewing, history, generate, cancel, show: setViewing, backToLive: () => setViewing(null), clearHistory };

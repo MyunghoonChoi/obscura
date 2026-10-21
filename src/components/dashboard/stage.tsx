@@ -1,6 +1,14 @@
 "use client";
 
-import { AlertTriangleIcon, DownloadIcon, ExternalLinkIcon, Loader2Icon, WandSparklesIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  CheckIcon,
+  DownloadIcon,
+  ExternalLinkIcon,
+  ImagePlusIcon,
+  Loader2Icon,
+  WandSparklesIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -8,14 +16,22 @@ import { Button } from "@/components/ui/button";
 import { isBusy, type JobState } from "@/hooks/use-generation";
 import { cn } from "@/lib/utils";
 
+/** Sends a finished still back into the character's training dataset. */
+export interface DatasetAction {
+  characterName: string;
+  state: "idle" | "adding" | "added";
+  onAdd: () => void;
+}
+
 interface StageProps {
   job: JobState;
   width: number;
   height: number;
+  datasetAction?: DatasetAction;
 }
 
 /** The big canvas: empty state → queued → live latent previews + progress → final video/image. */
-export function Stage({ job, width, height }: StageProps) {
+export function Stage({ job, width, height, datasetAction }: StageProps) {
   const busy = isBusy(job.status);
   const result = job.results[0];
   const elapsed = useElapsed(busy ? job.startedAt : undefined);
@@ -124,6 +140,25 @@ export function Stage({ job, width, height }: StageProps) {
           <Button variant="ghost" size="sm" nativeButton={false} render={<a href={result.url} target="_blank" rel="noreferrer" />}>
             <ExternalLinkIcon /> Open
           </Button>
+          {datasetAction && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={datasetAction.onAdd}
+              disabled={datasetAction.state !== "idle"}
+              title="Good likeness? Add it to the training set for the next LoRA version."
+              className="border-primary/40"
+            >
+              {datasetAction.state === "adding" ? (
+                <Loader2Icon className="animate-spin" />
+              ) : datasetAction.state === "added" ? (
+                <CheckIcon className="text-emerald-400" />
+              ) : (
+                <ImagePlusIcon />
+              )}
+              {datasetAction.state === "added" ? "Added to" : "Add to"} {datasetAction.characterName}&apos;s dataset
+            </Button>
+          )}
         </div>
       )}
     </div>
