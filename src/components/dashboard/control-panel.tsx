@@ -308,7 +308,7 @@ export function ControlPanel({
             onChange={(identityWeight) => setParams({ identityWeight })}
           />
         )}
-        {hasFace && !isRemix && (
+        {hasFace && !isFaceSwap && (
           <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
             <span>
               Finish with a face swap

@@ -498,8 +498,8 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
     "Applying pose",
   );
 
-  let model = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-  if (isVideo) model = animate(g, model, p.motionModule);
+  const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
+  const model = isVideo ? animate(g, identity, p.motionModule) : identity;
 
   // denoise 1 redraws everything from the prompt; lower starts from the source frames to keep their look.
   const latent =
@@ -512,7 +512,11 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
           "Preparing latent",
         );
 
-  const images = sampleAndDecode(g, p, { model, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, p.denoise);
+  let images = sampleAndDecode(g, p, { model, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, p.denoise);
+  if (p.faceSwapAfter && input.faces?.length && input.models!.swapModel) {
+    // The refine uses the plain prompt conditioning: the pose ControlNet hint belongs to the whole frame, not a face crop.
+    images = swapFace(g, p, input, images, seed, !isVideo && p.refineFace ? { c, model: identity } : undefined);
+  }
   save(g, images, isVideo && { fps: src.fps!, audio: src.audio });
   return size;
 }

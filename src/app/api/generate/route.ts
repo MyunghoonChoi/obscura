@@ -89,10 +89,10 @@ export async function POST(req: Request) {
     if (isFaceSwap && !faces.length)
       return bad("Face swap needs a face: pick a character with starred photos, or drop a one-off face reference.");
 
-    // Image/Video can finish with a face swap; without a swap model it's skipped with a note rather than refused.
-    if (!isRemix && params.faceSwapAfter && faces.length) {
-      const remix = await remixAvailability();
-      if (remix.models.swapModel) models = remix.models;
+    // Image/Video and motion transfer can finish with a face swap; without a swap model it's skipped with a note.
+    if (!isFaceSwap && params.faceSwapAfter && faces.length) {
+      const available = models ?? (await remixAvailability()).models;
+      if (available.swapModel) models = available;
       else warnings.push("Face swap finish skipped: no swap model installed (run setup_cloud.sh).");
     }
 
