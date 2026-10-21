@@ -289,9 +289,12 @@ export function ControlPanel({
 
       <div className="space-y-2">
         <Label className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          {character ? "One-off face override" : "One-off face reference"}
+          {character ? "Different face for this render" : "One-off face"}
         </Label>
-        <p className="-mt-1 text-[11px] text-muted-foreground">One image, used for this render only and not saved to a character.</p>
+        <p className="-mt-1 text-[11px] leading-snug text-muted-foreground">
+          Only the face in this photo is used{character ? ", instead of the character's" : ""}; clothes, pose and
+          background are ignored. To put the character into a photo (outfit, pose, scene), use Remix › Face swap.
+        </p>
         <ReferenceDrop file={reference} onChange={setReference} />
         {hasFace && samples && (
           <ParamSlider

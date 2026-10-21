@@ -87,9 +87,9 @@ export function ReferenceDrop({ file, onChange }: ReferenceDropProps) {
         <div className="flex w-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
           <ImagePlusIcon className="size-6 transition-transform group-hover:scale-110" />
           <p className="text-sm">
-            <span className="font-medium text-foreground">Drop a face reference</span> or click / paste
+            <span className="font-medium text-foreground">Drop a face photo</span> or click / paste
           </p>
-          <p className="text-xs">One clear, front-facing portrait</p>
+          <p className="text-xs">Face only. A clear, front-facing portrait works best</p>
         </div>
       )}
     </div>
