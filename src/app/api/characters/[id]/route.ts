@@ -30,7 +30,7 @@ export async function PATCH(req: Request, ctx: RouteContext<"/api/characters/[id
   }
 }
 
-/** DELETE /api/characters/:id — moves the folder to characters/_trash (trained LoRAs stay in ComfyUI). */
+/** DELETE /api/characters/:id — moves the folder and its trained LoRA files to characters/_trash. */
 export async function DELETE(_req: Request, ctx: RouteContext<"/api/characters/[id]">) {
   const { id } = await ctx.params;
   try {

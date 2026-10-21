@@ -10,12 +10,18 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, json, type DetailResponse } from "@/lib/characters/api";
-import { TRAINING_PRESETS, type TrainingPhase, type TrainingPreset, type TrainingStatus } from "@/lib/characters/types";
+import {
+  TRAINING_BATCH_SIZE,
+  TRAINING_PRESETS,
+  type TrainingPhase,
+  type TrainingPreset,
+  type TrainingStatus,
+} from "@/lib/characters/types";
 import { cn } from "@/lib/utils";
 
 const MIN_IMAGES = 3;
-/** Measured on an RTX 4060 8 GB (SD1.5, 512px, batch 2: 2.08 it/s) — only used for the estimate. */
-const SECONDS_PER_STEP = 0.48;
+/** Rough guess for SDXL at 1024px, batch 4, on a 4090 / A6000 — not yet measured; only used for the estimate. */
+const SECONDS_PER_STEP = 1.6;
 const PHASE_LABEL: Record<TrainingPhase, string> = {
   starting: "Starting trainer…",
   loading: "Loading base model…",
@@ -70,8 +76,8 @@ function TrainForm({ data, onStarted }: { data: DetailResponse; onStarted: () =>
   );
   const [starting, setStarting] = useState(false);
 
-  const steps = Math.round(TRAINING_PRESETS[preset].views / 2);
-  const minutes = Math.max(1, Math.round((steps * SECONDS_PER_STEP) / 60 + 1));
+  const steps = Math.round(TRAINING_PRESETS[preset].views / TRAINING_BATCH_SIZE);
+  const minutes = Math.max(1, Math.round((steps * SECONDS_PER_STEP) / 60 + 2));
   const tooFew = c.images.length < MIN_IMAGES;
   const blocker = !data.trainerInstalled
     ? "The trainer isn't installed (see README → Character LoRAs)."
@@ -235,7 +241,7 @@ function VersionsCard({ data, onChange }: { data: DetailResponse; onChange: () =
       <h2 className="text-sm font-semibold">Versions</h2>
       {c.versions.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          None yet. Until v1 is trained, generating with this character uses its starred images through IP-Adapter only.
+          None yet. Until v1 is trained, generating with this character uses its starred photos through FaceID only.
         </p>
       ) : (
         <div role="radiogroup" aria-label="Active LoRA version" className="space-y-1.5">
@@ -279,7 +285,7 @@ function VersionsCard({ data, onChange }: { data: DetailResponse; onChange: () =
                 c.activeVersion === null ? "border-primary bg-primary" : "border-muted-foreground",
               )}
             />
-            No LoRA (IP-Adapter only)
+            No LoRA (FaceID only)
           </button>
         </div>
       )}

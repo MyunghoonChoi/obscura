@@ -34,7 +34,7 @@ export function HistoryStrip({ items, activeId, onSelect, onClear }: HistoryStri
                 // eslint-disable-next-line @next/next/no-img-element -- proxied ComfyUI output
                 <img src={r.url} alt="" className="size-full object-cover" />
               )}
-              {item.mode === "video" && (
+              {r.kind === "video" && (
                 <span className="absolute right-1 bottom-1 rounded bg-black/70 px-1 text-[9px] font-medium text-white">VID</span>
               )}
             </button>

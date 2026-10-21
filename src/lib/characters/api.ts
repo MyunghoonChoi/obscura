@@ -32,6 +32,18 @@ export interface DetailResponse {
   trainerInstalled: boolean;
 }
 
+/**
+ * Asks, then deletes a character (server moves its folder and LoRA files to characters/_trash).
+ * Resolves false if the user cancelled; throws with the server's message on failure.
+ */
+export async function deleteCharacter(c: Pick<Character, "id" | "name" | "versions">): Promise<boolean> {
+  const loras = c.versions.length ? ` and its ${c.versions.length} LoRA version${c.versions.length === 1 ? "" : "s"}` : "";
+  if (!confirm(`Delete "${c.name}"?\n\nIts photos${loras} move to characters/_trash, so you can still restore them from there.`))
+    return false;
+  await api(`/api/characters/${c.id}`, { method: "DELETE" });
+  return true;
+}
+
 /** Suggests a rare, ASCII trigger from a display name ("Mina Park" → "minapark_ob"). */
 export function suggestTrigger(name: string): string {
   const slug = name

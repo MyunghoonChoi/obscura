@@ -8,7 +8,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { api, type DetailResponse } from "@/lib/characters/api";
+import { api, deleteCharacter, type DetailResponse } from "@/lib/characters/api";
 
 import { DatasetPanel } from "./dataset-panel";
 import { TrainingPanel } from "./training-panel";
@@ -77,9 +77,9 @@ export function CharacterStudio({ id }: { id: string }) {
   const c = data.character;
 
   const remove = async () => {
-    if (!confirm(`Move "${c.name}" to characters/_trash? Trained LoRA files stay in ComfyUI.`)) return;
     try {
-      await api(`/api/characters/${id}`, { method: "DELETE" });
+      if (!(await deleteCharacter(c))) return;
+      toast(`Deleted ${c.name}.`);
       router.push("/characters");
     } catch (e) {
       toast.error((e as Error).message);
@@ -101,8 +101,8 @@ export function CharacterStudio({ id }: { id: string }) {
         </div>
         {c.activeVersion ? <Badge>LoRA v{c.activeVersion}</Badge> : <Badge variant="outline">No LoRA yet</Badge>}
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" size="icon-sm" aria-label="Move character to trash" title="Move to trash" onClick={remove}>
-            <Trash2Icon />
+          <Button variant="ghost" size="sm" onClick={remove} className="text-muted-foreground hover:text-destructive">
+            <Trash2Icon /> Delete
           </Button>
           <Button
             size="sm"

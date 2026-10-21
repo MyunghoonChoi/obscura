@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { isBusy, useGeneration } from "@/hooks/use-generation";
 import { api, json, trainedCheckpoint, type LibraryResponse } from "@/lib/characters/api";
 import type { CharacterSummary, TrainingStatus } from "@/lib/characters/types";
-import { paramsForCheckpoint } from "@/lib/comfy/architectures";
+import { guessPromptStyle, RESOLUTIONS } from "@/lib/comfy/presets";
 import { DEFAULT_PARAMS, type GenerationParams } from "@/lib/comfy/types";
 
 import { ControlPanel, type ComfyOptions } from "./control-panel";
@@ -21,19 +21,19 @@ import { Stage, type DatasetAction } from "./stage";
 const PARAMS_KEY = "obscura:params";
 const OFFLINE: ComfyOptions = {
   online: false,
-  vramProfile: "low",
   checkpoints: [],
-  checkpointArchitectures: {},
   motionModules: [],
   samplers: [],
   schedulers: [],
-  ipAdapterPresets: [],
+  remix: { missing: { motion: [], faceswap: [] }, refineAvailable: false },
 };
 
 export function Dashboard() {
   const router = useRouter();
   const [params, setParamsState] = useState<GenerationParams>(DEFAULT_PARAMS);
   const [reference, setReference] = useState<File | null>(null);
+  /** Remix source clip/photo. Kept in memory only (too big for localStorage), like the reference. */
+  const [source, setSource] = useState<File | null>(null);
   const [options, setOptions] = useState<ComfyOptions | null>(null);
   const [characters, setCharacters] = useState<CharacterSummary[]>([]);
   const [training, setTraining] = useState<TrainingStatus | null>(null);
@@ -87,24 +87,20 @@ export function Dashboard() {
         current && list.includes(current) ? current : (list[0] ?? "");
       const fromUrl = chars.find((c) => c.id === urlCharacter);
       const characterId = fromUrl?.id ?? (chars.some((c) => c.id === saved.characterId) ? saved.characterId! : "");
-      const next: GenerationParams = {
+      const checkpoint = trainedCheckpoint(fromUrl, opts.checkpoints) ?? pick(saved.checkpoint, opts.checkpoints);
+      // Sizes saved by the old SD 1.5 build (512×768 etc.) aren't SDXL buckets; fall back to the default.
+      const sdxlSize = RESOLUTIONS.some((r) => r.w === saved.width && r.h === saved.height);
+      setParamsState({
         ...DEFAULT_PARAMS,
         ...saved,
-        checkpoint: trainedCheckpoint(fromUrl, opts.checkpoints) ?? pick(saved.checkpoint, opts.checkpoints),
+        ...(!sdxlSize && { width: DEFAULT_PARAMS.width, height: DEFAULT_PARAMS.height }),
+        checkpoint,
+        promptStyle: saved.checkpoint === checkpoint && saved.promptStyle ? saved.promptStyle : guessPromptStyle(checkpoint),
         motionModule: pick(saved.motionModule, opts.motionModules),
         characterId,
         loraStrength: fromUrl?.loraStrength ?? saved.loraStrength ?? DEFAULT_PARAMS.loraStrength,
         useCharacterRefs: fromUrl ? !fromUrl.activeVersion : (saved.useCharacterRefs ?? DEFAULT_PARAMS.useCharacterRefs),
-      };
-      // Settings saved before the architecture switch existed, or a checkpoint that changed under them,
-      // take their graph family (and matching size / motion module) from the checkpoint itself.
-      const detected = opts.checkpointArchitectures[next.checkpoint];
-      const stale = !saved.architecture || next.checkpoint !== saved.checkpoint || (!!detected && detected !== saved.architecture);
-      setParamsState(
-        stale && next.checkpoint
-          ? { ...next, ...paramsForCheckpoint(next.checkpoint, opts.checkpointArchitectures, next, opts.motionModules) }
-          : next,
-      );
+      });
     });
     return () => {
       cancelled = true;
@@ -190,12 +186,14 @@ export function Dashboard() {
             setParams={setParams}
             reference={reference}
             setReference={setReference}
+            source={source}
+            setSource={setSource}
             options={options}
             characters={characters}
             training={training}
             onCharactersChanged={() => void loadCharacters()}
             busy={busy}
-            onGenerate={() => generate(params, reference)}
+            onGenerate={() => generate(params, reference, params.mode === "remix" ? source : null)}
             onCancel={cancel}
           />
         </div>
@@ -209,7 +207,13 @@ export function Dashboard() {
           </Button>
         )}
         <div className="min-h-0 flex-1">
-          <Stage job={display} width={params.width} height={params.height} datasetAction={datasetAction} />
+          <Stage
+            job={display}
+            // Remix output follows the source's aspect ratio.
+            width={params.mode === "remix" && params.sourceWidth ? params.sourceWidth : params.width}
+            height={params.mode === "remix" && params.sourceHeight ? params.sourceHeight : params.height}
+            datasetAction={datasetAction}
+          />
         </div>
         <HistoryStrip items={history} activeId={display.promptId} onSelect={show} onClear={clearHistory} />
       </main>

@@ -97,19 +97,26 @@ export async function interrupt(promptId?: string): Promise<void> {
   });
 }
 
-/** GET /object_info/{node} → the dropdown options of one of its inputs (e.g. installed checkpoints). */
-export async function listNodeOptions(nodeClass: string, input: string): Promise<string[]> {
+type NodeSpec = { input: { required?: Record<string, unknown[]>; optional?: Record<string, unknown[]> } };
+
+/** GET /object_info/{node} → its input spec, or undefined if the node pack isn't installed (or ComfyUI is offline). */
+export async function getNodeSpec(nodeClass: string): Promise<NodeSpec | undefined> {
   try {
     const res = await comfyFetch(`/object_info/${encodeURIComponent(nodeClass)}`);
-    const json = (await res.json()) as Record<string, { input: { required?: Record<string, unknown[]> } }>;
-    const spec = json[nodeClass]?.input.required?.[input];
-    // Legacy format: [["a","b"], {...}]; new COMBO format: ["COMBO", { options: [...] }]
-    if (Array.isArray(spec?.[0])) return spec[0] as string[];
-    const opts = (spec?.[1] as { options?: string[] } | undefined)?.options;
-    return Array.isArray(opts) ? opts : [];
+    const json = (await res.json()) as Record<string, NodeSpec>;
+    return json[nodeClass];
   } catch {
-    return []; // node pack not installed or server offline
+    return undefined;
   }
+}
+
+/** The dropdown options of one of a node's inputs (e.g. installed checkpoints). */
+export async function listNodeOptions(nodeClass: string, input: string): Promise<string[]> {
+  const spec = (await getNodeSpec(nodeClass))?.input.required?.[input];
+  // Legacy format: [["a","b"], {...}]; new COMBO format: ["COMBO", { options: [...] }]
+  if (Array.isArray(spec?.[0])) return spec[0] as string[];
+  const opts = (spec?.[1] as { options?: string[] } | undefined)?.options;
+  return Array.isArray(opts) ? opts : [];
 }
 
 /** POST /free — unloads models from VRAM so the LoRA trainer gets the whole card. */

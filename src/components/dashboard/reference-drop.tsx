@@ -68,7 +68,7 @@ export function ReferenceDrop({ file, onChange }: ReferenceDropProps) {
               <UserRoundIcon className="size-3.5 text-primary" /> Character locked
             </p>
             <p className="truncate text-xs text-muted-foreground">{file?.name}</p>
-            <p className="text-xs text-muted-foreground">Face is injected via IP-Adapter on every frame.</p>
+            <p className="text-xs text-muted-foreground">Applied with FaceID (and used by face swap).</p>
           </div>
           <button
             type="button"

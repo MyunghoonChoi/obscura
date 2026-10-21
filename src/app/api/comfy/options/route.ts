@@ -1,30 +1,27 @@
-import type { Architecture } from "@/lib/comfy/architectures";
 import { listNodeOptions } from "@/lib/comfy/client";
-import { checkpointArchitecture, VRAM_PROFILE } from "@/lib/comfy/models";
+import { remixAvailability, sdxlCheckpoints } from "@/lib/comfy/models";
+import { isSdxlMotionModule } from "@/lib/comfy/presets";
 
 export const runtime = "nodejs";
 
-/** GET /api/comfy/options — model/sampler dropdowns, read live from the ComfyUI server's /object_info. */
+/**
+ * GET /api/comfy/options — dropdowns read live from ComfyUI's /object_info, filtered to what the
+ * SDXL pipeline can use, plus which Remix modes are ready on this ComfyUI.
+ */
 export async function GET() {
-  const [checkpoints, motionModules, samplers, schedulers, ipAdapterPresets] = await Promise.all([
-    listNodeOptions("CheckpointLoaderSimple", "ckpt_name"),
+  const [checkpoints, motionModules, samplers, schedulers, remix] = await Promise.all([
+    sdxlCheckpoints(),
     listNodeOptions("ADE_AnimateDiffLoaderGen1", "model_name"),
     listNodeOptions("KSampler", "sampler_name"),
     listNodeOptions("KSampler", "scheduler"),
-    listNodeOptions("IPAdapterUnifiedLoader", "preset"),
+    remixAvailability(),
   ]);
-  // Lets the UI switch the graph family automatically when a checkpoint is picked.
-  const checkpointArchitectures: Record<string, Architecture> = Object.fromEntries(
-    await Promise.all(checkpoints.map(async (c) => [c, await checkpointArchitecture(c)] as const)),
-  );
   return Response.json({
     online: samplers.length > 0,
-    vramProfile: VRAM_PROFILE,
     checkpoints,
-    checkpointArchitectures,
-    motionModules,
+    motionModules: motionModules.filter(isSdxlMotionModule),
     samplers,
     schedulers,
-    ipAdapterPresets,
+    remix: { missing: remix.missing, refineAvailable: remix.refineAvailable },
   });
 }

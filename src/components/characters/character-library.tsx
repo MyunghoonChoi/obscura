@@ -1,16 +1,17 @@
 "use client";
 
-import { ArrowLeftIcon, Loader2Icon, PlusIcon, UserRoundIcon, UsersRoundIcon } from "lucide-react";
+import { ArrowLeftIcon, Loader2Icon, PlusIcon, Trash2Icon, UserRoundIcon, UsersRoundIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, json, suggestTrigger, type LibraryResponse } from "@/lib/characters/api";
+import { api, deleteCharacter, json, suggestTrigger, type LibraryResponse } from "@/lib/characters/api";
 import { CLASS_WORDS, type Character, type CharacterSummary } from "@/lib/characters/types";
 
 /** /characters — every character as a card, plus the "new character" form. */
@@ -74,6 +75,7 @@ export function CharacterLibrary() {
                     : 0
                   : null
               }
+              onDeleted={() => setData((d) => d && { ...d, characters: d.characters.filter((x) => x.id !== c.id) })}
             />
           ))}
         </div>
@@ -82,11 +84,54 @@ export function CharacterLibrary() {
   );
 }
 
-function CharacterCard({ character: c, trainingPct }: { character: CharacterSummary; trainingPct: number | null }) {
+function CharacterCard({
+  character: c,
+  trainingPct,
+  onDeleted,
+}: {
+  character: CharacterSummary;
+  trainingPct: number | null;
+  onDeleted: () => void;
+}) {
+  const [deleting, setDeleting] = useState(false);
+
+  const remove = async () => {
+    setDeleting(true);
+    try {
+      if (await deleteCharacter(c)) {
+        toast(`Deleted ${c.name}.`);
+        onDeleted();
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="group relative">
+      <CardLink character={c} trainingPct={trainingPct} />
+      {/* A sibling of the link, not inside it: a button nested in <a> is invalid and would navigate. */}
+      <button
+        type="button"
+        onClick={remove}
+        disabled={deleting || trainingPct !== null}
+        aria-label={`Delete ${c.name}`}
+        title={trainingPct !== null ? "Stop training before deleting" : `Delete ${c.name}`}
+        className="absolute top-2 right-2 rounded-full bg-background/80 p-1.5 text-muted-foreground backdrop-blur transition hover:text-destructive focus-visible:opacity-100 disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100"
+      >
+        {deleting ? <Loader2Icon className="size-3.5 animate-spin" /> : <Trash2Icon className="size-3.5" />}
+      </button>
+    </div>
+  );
+}
+
+function CardLink({ character: c, trainingPct }: { character: CharacterSummary; trainingPct: number | null }) {
   return (
     <Link
       href={`/characters/${c.id}`}
-      className="group overflow-hidden rounded-xl border border-border bg-card/60 transition hover:border-primary/60 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+      className="block overflow-hidden rounded-xl border border-border bg-card/60 transition hover:border-primary/60 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
     >
       <div className="relative aspect-[3/4] bg-muted/40">
         {c.coverUrl ? (

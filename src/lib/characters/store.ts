@@ -6,7 +6,7 @@ import path from "node:path";
 
 import sharp from "sharp";
 
-import { DATA_DIR } from "@/lib/paths";
+import { DATA_DIR, LORA_DIR } from "@/lib/paths";
 
 import type { Character, CharacterDetail, CharacterSummary, DatasetImage, LoraVersion, RunResult } from "./types";
 
@@ -169,12 +169,23 @@ export async function updateCharacter(
   });
 }
 
-/** Moves the whole folder to characters/_trash — nothing is deleted from disk. */
+/**
+ * Deletes a character from the library by moving its folder — and its trained LoRA files, so they
+ * vanish from ComfyUI's list too — to characters/_trash/<id>-<ts>/. Nothing is erased from disk.
+ */
 export async function trashCharacter(id: string): Promise<void> {
-  if (!(await getCharacter(id))) throw new NotFoundError(`Character "${id}" not found.`);
-  const trash = path.join(DATA_DIR, "_trash");
-  await fs.mkdir(trash, { recursive: true });
-  await fs.rename(charDir(id), path.join(trash, `${id}-${Date.now()}`));
+  const c = await getCharacter(id);
+  if (!c) throw new NotFoundError(`Character "${id}" not found.`);
+  const dest = path.join(DATA_DIR, "_trash", `${id}-${Date.now()}`);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.rename(charDir(id), dest);
+
+  for (const v of c.versions) {
+    const lora = path.join(LORA_DIR, v.loraFile);
+    if (!(await exists(lora))) continue;
+    await fs.mkdir(path.join(dest, "loras"), { recursive: true });
+    await fs.rename(lora, path.join(dest, "loras", path.basename(lora))).catch(() => {});
+  }
 }
 
 /** Longest side kept for training images; kohya trains at ~512–768 px, so bigger only costs disk and caching time. */

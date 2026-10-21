@@ -1,7 +1,5 @@
 // Shared types for the character library and LoRA training (UI ↔ API).
 
-import type { Architecture } from "@/lib/comfy/architectures";
-
 export const CLASS_WORDS = ["woman", "man", "girl", "boy", "person"] as const;
 
 /** One trained LoRA file. Versions only ever grow: v1, v2, … each trained on the dataset as it was then. */
@@ -14,8 +12,8 @@ export interface LoraVersion {
   steps: number;
   preset: TrainingPreset;
   checkpoint: string;
-  /** Graph family the LoRA loads into. Missing on versions trained before SDXL support = "sd15". */
-  architecture?: Architecture;
+  /** Model family the LoRA loads into. Missing = trained before the SDXL switch (SD 1.5, no longer loadable). */
+  architecture?: "sd15" | "sdxl";
 }
 
 export interface Character {
@@ -54,6 +52,9 @@ export interface CharacterDetail extends Character {
 }
 
 export type TrainingPreset = "quick" | "standard" | "thorough";
+
+/** SDXL LoRA batch size: 1024px buckets at batch 4 fit in 24 GB with gradient checkpointing. */
+export const TRAINING_BATCH_SIZE = 4;
 
 export const TRAINING_PRESETS: Record<TrainingPreset, { label: string; views: number; epochs: number; hint: string }> = {
   quick: { label: "Quick", views: 1600, epochs: 8, hint: "First draft. Good for checking the dataset works." },

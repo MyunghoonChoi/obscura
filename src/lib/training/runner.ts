@@ -15,9 +15,15 @@ import {
   ValidationError,
   writeLastRun,
 } from "@/lib/characters/store";
-import { TRAINING_PRESETS, type TrainingPhase, type TrainingPreset, type TrainingStatus } from "@/lib/characters/types";
+import {
+  TRAINING_BATCH_SIZE,
+  TRAINING_PRESETS,
+  type TrainingPhase,
+  type TrainingPreset,
+  type TrainingStatus,
+} from "@/lib/characters/types";
 import { freeMemory } from "@/lib/comfy/client";
-import { checkpointArchitecture } from "@/lib/comfy/models";
+import { checkpointFamily } from "@/lib/comfy/models";
 import {
   CHECKPOINT_DIR,
   DATA_DIR,
@@ -29,21 +35,21 @@ import {
 } from "@/lib/paths";
 
 /**
- * Runs kohya sd-scripts `train_network.py` (SD1.5 LoRA) as a detached process.
+ * Runs kohya sd-scripts `sdxl_train_network.py` (SDXL / Pony LoRA) as a detached process.
  *
  *   startTraining ─► runs/v<N>/{dataset.toml, command.json} ─► spawn run_training.py (detached)
- *                                                                 └─► train_network.py ─► train.log, exit.json
+ *                                                                 └─► sdxl_train_network.py ─► train.log, exit.json
  *   getTrainingStatus ◄─ reads .training.json (the one active run) + tails train.log for tqdm progress
  *
  * Everything lives in files, so a run keeps going (and is picked up again) across dashboard restarts.
- * Only one run at a time: an 8 GB card can't train and generate at once.
+ * Only one run at a time, and generation pauses while it runs: both want the whole GPU.
  */
 
 const LOCK_FILE = path.join(DATA_DIR, ".training.json");
 /** No log output for this long while "running" means the process is gone (or the PID was reused). */
 const STALE_MS = 20 * 60 * 1000;
 const MIN_IMAGES = 3;
-const BATCH_SIZE = 2;
+const BATCH_SIZE = TRAINING_BATCH_SIZE;
 
 interface ActiveRun {
   characterId: string;
@@ -65,7 +71,7 @@ export async function listCheckpoints(): Promise<string[]> {
 }
 
 export async function trainerInstalled(): Promise<boolean> {
-  const checks = [TRAINER_PYTHON, path.join(SD_SCRIPTS_DIR, "train_network.py"), RUN_WRAPPER];
+  const checks = [TRAINER_PYTHON, path.join(SD_SCRIPTS_DIR, "sdxl_train_network.py"), RUN_WRAPPER];
   return (await Promise.all(checks.map((p) => fs.access(p).then(() => true, () => false)))).every(Boolean);
 }
 
@@ -85,9 +91,8 @@ export async function startTraining(
   const ckptPath = path.join(CHECKPOINT_DIR, opts.checkpoint);
   if (!opts.checkpoint || opts.checkpoint.includes("..") || !(await fs.stat(ckptPath).catch(() => null))?.isFile())
     throw new ValidationError("Pick a base checkpoint that exists in ComfyUI/models/checkpoints.");
-  // train_network.py is the SD1.5 trainer; SDXL/Pony LoRAs need sdxl_train_network.py and a 24 GB card.
-  if ((await checkpointArchitecture(opts.checkpoint)) !== "sd15")
-    throw new ValidationError("That's an SDXL checkpoint. Only SD 1.5 LoRA training is set up so far.");
+  if ((await checkpointFamily(opts.checkpoint)) === "sd15")
+    throw new ValidationError("That's an SD 1.5 checkpoint. Character LoRAs are trained on SDXL / Pony checkpoints.");
 
   const version = await nextVersion(characterId);
   const dir = runDir(characterId, version);
@@ -105,11 +110,11 @@ export async function startTraining(
     "shuffle_caption = false",
     "",
     "[[datasets]]",
-    "resolution = 512",
+    "resolution = 1024",
     `batch_size = ${BATCH_SIZE}`,
     "enable_bucket = true",
-    "min_bucket_reso = 256",
-    "max_bucket_reso = 1024",
+    "min_bucket_reso = 512",
+    "max_bucket_reso = 2048",
     "bucket_reso_steps = 64",
     "",
     "  [[datasets.subsets]]",
@@ -121,7 +126,7 @@ export async function startTraining(
   await fs.writeFile(path.join(dir, "dataset.toml"), toml);
 
   const args = [
-    path.join(SD_SCRIPTS_DIR, "train_network.py"),
+    path.join(SD_SCRIPTS_DIR, "sdxl_train_network.py"),
     `--pretrained_model_name_or_path=${ckptPath}`,
     `--dataset_config=${path.join(dir, "dataset.toml")}`,
     `--output_dir=${path.join(LORA_DIR, LORA_SUBDIR)}`,
@@ -132,16 +137,23 @@ export async function startTraining(
     "--network_alpha=16",
     "--learning_rate=1e-4",
     "--unet_lr=1e-4",
-    "--text_encoder_lr=5e-5",
+    // UNet-only with cached text-encoder outputs: the standard SDXL character-LoRA recipe. The trigger's
+    // fixed embedding is enough for the UNet to bind the identity, and caching halves step time.
+    "--network_train_unet_only",
+    "--cache_text_encoder_outputs",
     "--optimizer_type=AdamW8bit",
     "--lr_scheduler=cosine",
     `--max_train_epochs=${epochs}`,
     "--min_snr_gamma=5",
-    "--mixed_precision=fp16",
+    "--mixed_precision=bf16",
     "--save_precision=fp16",
     "--cache_latents",
+    // SDXL's VAE overflows in half precision; keep it fp32 while caching latents.
+    "--no_half_vae",
+    "--gradient_checkpointing",
     "--sdpa",
-    "--max_data_loader_n_workers=0",
+    "--max_data_loader_n_workers=2",
+    "--persistent_data_loader_workers",
     `--seed=${Math.floor(Math.random() * 2 ** 31)}`,
     `--training_comment=Obscura ${c.name} v${version}`,
   ];
@@ -223,7 +235,7 @@ async function finalize(run: ActiveRun) {
       steps: parseProgress(await readTail(path.join(run.dir, "train.log"))).totalSteps,
       preset: run.preset,
       checkpoint: run.checkpoint,
-      architecture: "sd15",
+      architecture: "sdxl",
     }).catch(() => {});
     await writeLastRun(run.characterId, { version: run.version, state: "done", finishedAt });
   } else if (run.stopRequested) {

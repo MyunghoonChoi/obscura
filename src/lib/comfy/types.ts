@@ -1,10 +1,11 @@
 // Shared types between the dashboard UI and the ComfyUI proxy routes.
 
-import type { Architecture, PromptStyle } from "./architectures";
+import type { GenerationMode, PromptStyle, RemixMode } from "./presets";
 
-export type GenerationMode = "image" | "video";
+export type { GenerationMode, PromptStyle, RemixMode } from "./presets";
 
 export interface GenerationParams {
+  /** image / video = generate from the prompt; remix = edit an uploaded source clip or photo. */
   mode: GenerationMode;
   /**
    * The user's own text only. Trigger words and style tags are kept out of it and composed
@@ -12,33 +13,49 @@ export interface GenerationParams {
    */
   prompt: string;
   negativePrompt: string;
+  /** An SDXL / Pony checkpoint. */
   checkpoint: string;
-  /** Graph family to build. Must match the checkpoint (and motion module / character LoRA). */
-  architecture: Architecture;
-  /** Fine-tune prompt conventions layered on top (e.g. Pony score tags + clip skip). */
+  /** Fine-tune prompt conventions (e.g. Pony score tags + clip skip). */
   promptStyle: PromptStyle;
+  /** SDXL AnimateDiff module (mm_sdxl_v10_beta or HotshotXL). */
   motionModule: string;
-  /** Requested size. SDXL snaps it to the nearest ~1 MP training bucket (see fitResolution). */
+  /** Output size for image/video; snapped to the nearest SDXL bucket. Remix derives it from the source. */
   width: number;
   height: number;
   steps: number;
   cfg: number;
-  /** 1.0 = pure noise. < 1.0 with a reference image = img2img / img2vid from the reference. */
-  denoise: number;
   seed: number;
   sampler: string;
   scheduler: string;
-  /** Video only */
+  /** Video: frames to generate. */
   frames: number;
+  /** Video: playback rate. Remix motion: rate the source is resampled to (0 = keep the source's). */
   fps: number;
-  /** IP-Adapter strength applied to the reference image (0 disables the adapter). */
-  ipAdapterWeight: number;
-  ipAdapterPreset: string;
+  /** Second sampling pass on an upscaled latent ("hires fix"). 1 = off. */
+  hiresScale: number;
+  hiresDenoise: number;
+  /** IP-Adapter FaceID Plus v2 strength on the reference face(s). 0 disables it. */
+  identityWeight: number;
   /** Character from the library ("" = none): adds its LoRA + trigger word to the graph. */
   characterId: string;
   loraStrength: number;
-  /** Also feed the character's starred dataset images to IP-Adapter (when no manual reference is set). */
+  /** Feed the character's starred dataset images to FaceID (when no one-off face reference is set). */
   useCharacterRefs: boolean;
+
+  // ── Remix ──
+  remixMode: RemixMode;
+  /** OpenPose ControlNet strength (motion transfer). */
+  controlStrength: number;
+  /** Motion transfer: 1 = redraw everything from the prompt; lower keeps more of the source's colours/layout. */
+  denoise: number;
+  /** Face swap: refine the swapped face with the character LoRA + FaceID (stills only, see workflow.ts). */
+  refineFace: boolean;
+  refineDenoise: number;
+  /** Remix video: frames read from the source (after resampling). 0 = the whole clip, up to MAX_FRAMES. */
+  remixFrameCap: number;
+  /** Source dimensions as measured by the browser; used to pick the SDXL bucket. */
+  sourceWidth: number;
+  sourceHeight: number;
 }
 
 /** A file that lives on the ComfyUI server (as returned by /upload/image and /history). */
@@ -63,27 +80,33 @@ export type JobEvent =
   | { type: "error"; message: string };
 
 export const DEFAULT_PARAMS: GenerationParams = {
-  mode: "video",
+  mode: "image",
   prompt: "",
-  negativePrompt:
-    "blurry, lowres, deformed face, extra fingers, watermark, text, jpeg artifacts",
+  negativePrompt: "blurry, lowres, deformed face, bad anatomy, extra fingers, watermark, text, jpeg artifacts",
   checkpoint: "",
-  architecture: "sd15",
   promptStyle: "none",
   motionModule: "",
-  width: 512,
-  height: 768,
-  steps: 25,
-  cfg: 7,
-  denoise: 1,
+  width: 832,
+  height: 1216,
+  steps: 30,
+  cfg: 6,
   seed: -1,
-  sampler: "euler_ancestral",
-  scheduler: "normal",
-  frames: 16,
-  fps: 8,
-  ipAdapterWeight: 0.85,
-  ipAdapterPreset: "PLUS FACE (portraits)",
+  sampler: "dpmpp_2m",
+  scheduler: "karras",
+  frames: 48,
+  fps: 12,
+  hiresScale: 1.5,
+  hiresDenoise: 0.45,
+  identityWeight: 0.8,
   characterId: "",
   loraStrength: 0.8,
   useCharacterRefs: true,
+  remixMode: "motion",
+  controlStrength: 0.9,
+  denoise: 1,
+  refineFace: true,
+  refineDenoise: 0.35,
+  remixFrameCap: 0,
+  sourceWidth: 0,
+  sourceHeight: 0,
 };

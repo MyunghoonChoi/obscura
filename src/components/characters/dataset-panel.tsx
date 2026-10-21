@@ -50,7 +50,7 @@ export function DatasetPanel({ character: c, onChange }: { character: CharacterD
           </li>
           <li>
             <b className="text-foreground">★ Star</b> the clearest face shots. Up to {MAX_REFS_USED} starred images also drive
-            IP-Adapter when you generate, which is how you bootstrap a character before its first LoRA exists.
+            FaceID when you generate, and the first one is the face used by Remix face swap. That is how you bootstrap a character before its first LoRA exists.
           </li>
           <li>
             <b className="text-foreground">Iterate:</b> generate, add your best results with <i>Add to dataset</i> in the studio, and
@@ -137,7 +137,7 @@ function DatasetCard({
           onClick={toggleStar}
           aria-pressed={starred}
           aria-label={starred ? "Unstar face reference" : "Star as face reference"}
-          title={starred ? "Face reference (used by IP-Adapter)" : "Use as face reference"}
+          title={starred ? "Face reference (used by FaceID and face swap)" : "Use as face reference"}
           className={cn(
             "absolute top-2 left-2 rounded-full bg-background/80 p-1.5 backdrop-blur transition",
             starred ? "text-amber-300" : "text-muted-foreground hover:text-foreground",

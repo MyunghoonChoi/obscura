@@ -158,7 +158,7 @@ export function useGeneration() {
   }, [follow]);
 
   const generate = useCallback(
-    async (params: GenerationParams, reference: File | null) => {
+    async (params: GenerationParams, reference: File | null, source: File | null = null) => {
       sourceRef.current?.close();
       setViewing(null);
       const startedAt = Date.now();
@@ -167,6 +167,7 @@ export function useGeneration() {
       const body = new FormData();
       body.append("params", JSON.stringify(params));
       if (reference) body.append("reference", reference);
+      if (source) body.append("source", source);
 
       try {
         const res = await fetch("/api/generate", { method: "POST", body });
