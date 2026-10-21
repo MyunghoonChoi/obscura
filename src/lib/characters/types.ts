@@ -53,7 +53,7 @@ export interface CharacterDetail extends Character {
 
 export type TrainingPreset = "quick" | "standard" | "thorough";
 
-/** SDXL LoRA batch size: 1024px buckets at batch 4 fit in 24 GB with gradient checkpointing. */
+/** SDXL LoRA batch size on a 24 GB card (1024px, gradient checkpointing). Bigger GPUs scale it up; see runner.ts. */
 export const TRAINING_BATCH_SIZE = 4;
 
 export const TRAINING_PRESETS: Record<TrainingPreset, { label: string; views: number; epochs: number; hint: string }> = {

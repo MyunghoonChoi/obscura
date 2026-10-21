@@ -20,8 +20,8 @@ import {
 import { cn } from "@/lib/utils";
 
 const MIN_IMAGES = 3;
-/** Rough guess for SDXL at 1024px, batch 4, on a 4090 / A6000 — not yet measured; only used for the estimate. */
-const SECONDS_PER_STEP = 1.6;
+/** Rough guess per image view for SDXL at 1024px on an Ada / Hopper card — not yet measured; only for the estimate. */
+const SECONDS_PER_VIEW = 0.35;
 const PHASE_LABEL: Record<TrainingPhase, string> = {
   starting: "Starting trainer…",
   loading: "Loading base model…",
@@ -76,8 +76,9 @@ function TrainForm({ data, onStarted }: { data: DetailResponse; onStarted: () =>
   );
   const [starting, setStarting] = useState(false);
 
-  const steps = Math.round(TRAINING_PRESETS[preset].views / TRAINING_BATCH_SIZE);
-  const minutes = Math.max(1, Math.round((steps * SECONDS_PER_STEP) / 60 + 2));
+  const batch = data.trainingBatchSize || TRAINING_BATCH_SIZE;
+  const steps = Math.round(TRAINING_PRESETS[preset].views / batch);
+  const minutes = Math.max(1, Math.round((TRAINING_PRESETS[preset].views * SECONDS_PER_VIEW) / 60 + 2));
   const tooFew = c.images.length < MIN_IMAGES;
   const blocker = !data.trainerInstalled
     ? "The trainer isn't installed (see README → Character LoRAs)."
@@ -132,7 +133,7 @@ function TrainForm({ data, onStarted }: { data: DetailResponse; onStarted: () =>
           </TabsList>
         </Tabs>
         <p className="text-[11px] text-muted-foreground">
-          {TRAINING_PRESETS[preset].hint} ~{steps.toLocaleString()} steps, about {minutes} min.
+          {TRAINING_PRESETS[preset].hint} ~{steps.toLocaleString()} steps at batch {batch}, about {minutes} min.
         </p>
       </div>
 

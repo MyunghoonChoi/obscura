@@ -49,7 +49,26 @@ const LOCK_FILE = path.join(DATA_DIR, ".training.json");
 /** No log output for this long while "running" means the process is gone (or the PID was reused). */
 const STALE_MS = 20 * 60 * 1000;
 const MIN_IMAGES = 3;
-const BATCH_SIZE = TRAINING_BATCH_SIZE;
+
+/**
+ * Batch size from the GPU's VRAM. SDXL at 1024px with gradient checkpointing needs roughly 4 GB per
+ * sample on top of the model, so: 24 GB → 4, 48 GB → 8, 80 GB → 16. Bigger batches use the card
+ * fully and cut wall-clock time; the learning rate is scaled with √batch to compensate for fewer steps.
+ */
+export async function trainingBatchSize(): Promise<number> {
+  const mb = await gpuMemoryMb();
+  if (mb >= 70000) return 16;
+  if (mb >= 40000) return 8;
+  return TRAINING_BATCH_SIZE;
+}
+
+function gpuMemoryMb(): Promise<number> {
+  return new Promise((resolve) =>
+    execFile("nvidia-smi", ["--query-gpu=memory.total", "--format=csv,noheader,nounits"], (err, out) =>
+      resolve(err ? 0 : Number(String(out).trim().split(/\s+/)[0]) || 0),
+    ),
+  );
+}
 
 interface ActiveRun {
   characterId: string;
@@ -102,6 +121,8 @@ export async function startTraining(
   // Aim for a fixed number of image views per preset regardless of dataset size.
   const { views, epochs } = TRAINING_PRESETS[preset];
   const repeats = Math.max(1, Math.round(views / (epochs * images.length)));
+  const batch = await trainingBatchSize();
+  const lr = (1e-4 * Math.sqrt(batch / TRAINING_BATCH_SIZE)).toPrecision(3);
   const outputName = `${characterId}_v${version}`;
 
   const toml = [
@@ -111,7 +132,7 @@ export async function startTraining(
     "",
     "[[datasets]]",
     "resolution = 1024",
-    `batch_size = ${BATCH_SIZE}`,
+    `batch_size = ${batch}`,
     "enable_bucket = true",
     "min_bucket_reso = 512",
     "max_bucket_reso = 2048",
@@ -135,8 +156,8 @@ export async function startTraining(
     "--network_module=networks.lora",
     "--network_dim=32",
     "--network_alpha=16",
-    "--learning_rate=1e-4",
-    "--unet_lr=1e-4",
+    `--learning_rate=${lr}`,
+    `--unet_lr=${lr}`,
     // UNet-only with cached text-encoder outputs: the standard SDXL character-LoRA recipe. The trigger's
     // fixed embedding is enough for the UNet to bind the identity, and caching halves step time.
     "--network_train_unet_only",

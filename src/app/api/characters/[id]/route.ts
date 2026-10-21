@@ -1,6 +1,6 @@
 import { getCharacterDetail, trashCharacter, updateCharacter, ValidationError } from "@/lib/characters/store";
 import { errorResponse } from "@/lib/http";
-import { getTrainingStatus, listCheckpoints, trainerInstalled } from "@/lib/training/runner";
+import { getTrainingStatus, listCheckpoints, trainerInstalled, trainingBatchSize } from "@/lib/training/runner";
 
 export const runtime = "nodejs";
 
@@ -9,7 +9,12 @@ export async function GET(_req: Request, ctx: RouteContext<"/api/characters/[id]
   const { id } = await ctx.params;
   // Status first: it finalizes a just-finished run, so the new version shows up in the same response.
   const training = await getTrainingStatus();
-  const [character, checkpoints, installed] = await Promise.all([getCharacterDetail(id), listCheckpoints(), trainerInstalled()]);
+  const [character, checkpoints, installed, batch] = await Promise.all([
+    getCharacterDetail(id),
+    listCheckpoints(),
+    trainerInstalled(),
+    trainingBatchSize(),
+  ]);
   if (!character) return Response.json({ error: "Character not found." }, { status: 404 });
   return Response.json({
     character,
@@ -17,6 +22,7 @@ export async function GET(_req: Request, ctx: RouteContext<"/api/characters/[id]
     busy: !!training,
     checkpoints,
     trainerInstalled: installed,
+    trainingBatchSize: batch,
   });
 }
 

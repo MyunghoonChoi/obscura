@@ -30,6 +30,8 @@ export interface DetailResponse {
   /** Base checkpoints on disk that can be trained on. */
   checkpoints: string[];
   trainerInstalled: boolean;
+  /** Batch size the trainer will use on this GPU (scales with VRAM). */
+  trainingBatchSize: number;
 }
 
 /**

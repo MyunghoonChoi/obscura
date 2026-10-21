@@ -80,7 +80,7 @@ FaceID copies a face from photos. A **LoRA** learns the character, so angles, ex
 1. **Create** a character. It gets a made-up *trigger word* (e.g. `mina_ob`) that the LoRA binds the identity to.
 2. **Build the dataset.** Drop 15–30 varied photos (or use the 📷+ button in the studio). With only a few, star them and generate variations: until v1 exists, starred photos drive FaceID. Keep good results with **Add to dataset**; removed images move to `removed/`.
 3. **Caption.** Each image's `.txt` starts with `<trigger> <class>`. Describe what *changes* (outfit, place, pose, light), not the face.
-4. **Train** (Quick / Standard / Thorough). SDXL at 1024px, batch 4, UNet-only with cached text-encoder outputs, bf16, gradient checkpointing. ComfyUI unloads its models and generating pauses until it finishes. The LoRA lands in `ComfyUI/models/loras/obscura/<id>_v<N>.safetensors` and becomes the active version.
+4. **Train** (Quick / Standard / Thorough). SDXL at 1024px, batch 4 / 8 / 16 on 24 / 48 / 80 GB cards (learning rate scaled by √batch), UNet-only with cached text-encoder outputs, bf16, gradient checkpointing. ComfyUI unloads its models and generating pauses until it finishes. The LoRA lands in `ComfyUI/models/loras/obscura/<id>_v<N>.safetensors` and becomes the active version.
 5. **Generate or Remix** with the character selected, add your best new results, and train v2, v3, …
 
 LoRAs trained by the earlier SD 1.5 build can't load into SDXL. They're skipped with a warning (the starred photos stand in), so retrain those characters once on the cloud box.
