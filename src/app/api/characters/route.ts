@@ -1,4 +1,4 @@
-import { createCharacter, listCharacters } from "@/lib/characters/store";
+import { createCharacter, diskInfo, listCharacters } from "@/lib/characters/store";
 import { errorResponse } from "@/lib/http";
 import { getTrainingStatus, trainerInstalled } from "@/lib/training/runner";
 
@@ -7,8 +7,13 @@ export const runtime = "nodejs";
 /** GET /api/characters — the library, plus whatever is training right now. */
 export async function GET() {
   try {
-    const [training, characters, installed] = await Promise.all([getTrainingStatus(), listCharacters(), trainerInstalled()]);
-    return Response.json({ characters, training, trainerInstalled: installed });
+    const [training, characters, installed, disk] = await Promise.all([
+      getTrainingStatus(),
+      listCharacters(),
+      trainerInstalled(),
+      diskInfo(),
+    ]);
+    return Response.json({ characters, training, trainerInstalled: installed, disk });
   } catch (err) {
     return errorResponse(err);
   }

@@ -64,6 +64,12 @@ export const TRAINING_PRESETS: Record<TrainingPreset, { label: string; views: nu
 
 export type TrainingPhase = "starting" | "loading" | "caching" | "training" | "saving";
 
+/** Free space on the volume that holds characters, LoRAs and models (so you know when to grow it). */
+export interface DiskInfo {
+  freeGb: number;
+  totalGb: number;
+}
+
 /** A run in progress (at most one at a time — the GPU is shared with ComfyUI). */
 export interface TrainingStatus {
   characterId: string;

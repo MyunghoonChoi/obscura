@@ -1,6 +1,6 @@
 "use client";
 
-import { ApertureIcon, RadioIcon, UsersRoundIcon } from "lucide-react";
+import { ApertureIcon, HardDriveIcon, RadioIcon, UsersRoundIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { isBusy, useGeneration } from "@/hooks/use-generation";
 import { api, json, trainedCheckpoint, type LibraryResponse } from "@/lib/characters/api";
-import type { CharacterSummary, TrainingStatus } from "@/lib/characters/types";
+import type { CharacterSummary, DiskInfo, TrainingStatus } from "@/lib/characters/types";
 import { guessPromptStyle, RESOLUTIONS } from "@/lib/comfy/presets";
 import { DEFAULT_PARAMS, type GenerationParams } from "@/lib/comfy/types";
 
@@ -37,6 +37,7 @@ export function Dashboard() {
   const [options, setOptions] = useState<ComfyOptions | null>(null);
   const [characters, setCharacters] = useState<CharacterSummary[]>([]);
   const [training, setTraining] = useState<TrainingStatus | null>(null);
+  const [disk, setDisk] = useState<DiskInfo | null>(null);
   /** Result URL → dataset add state, so a result can't be added twice by accident. */
   const [added, setAdded] = useState<Record<string, "adding" | "added">>({});
   const { job, display, viewing, history, generate, cancel, show, backToLive, clearHistory } = useGeneration();
@@ -56,6 +57,7 @@ export function Dashboard() {
     if (lib) {
       setCharacters(lib.characters);
       setTraining(lib.training);
+      setDisk(lib.disk);
     }
     return lib;
   }, []);
@@ -83,6 +85,7 @@ export function Dashboard() {
       const chars = lib?.characters ?? [];
       setCharacters(chars);
       setTraining(lib?.training ?? null);
+      setDisk(lib?.disk ?? null);
       const pick = (current: string | undefined, list: string[]) =>
         current && list.includes(current) ? current : (list[0] ?? "");
       const fromUrl = chars.find((c) => c.id === urlCharacter);
@@ -178,6 +181,16 @@ export function Dashboard() {
               />
               {status === "connecting" ? "Connecting" : `ComfyUI ${status}`}
             </Badge>
+            {disk && (
+              <Badge
+                variant="outline"
+                data-level={disk.freeGb < 8 ? "critical" : disk.freeGb < 20 ? "low" : "ok"}
+                title={`${disk.freeGb} of ${disk.totalGb} GB free on the volume. Under 20 GB: grow the RunPod volume (it can only be increased).`}
+                className="gap-1 data-[level=critical]:border-red-400/60 data-[level=critical]:text-red-300 data-[level=low]:border-amber-400/60 data-[level=low]:text-amber-200"
+              >
+                <HardDriveIcon className="size-3" /> {disk.freeGb} GB
+              </Badge>
+            )}
           </div>
         </header>
         <div className="flex-1 px-5 pt-5 lg:overflow-y-auto">

@@ -1,6 +1,6 @@
 // Browser-side helpers for the /api/characters routes.
 
-import type { Character, CharacterDetail, CharacterSummary, TrainingStatus } from "./types";
+import type { Character, CharacterDetail, CharacterSummary, DiskInfo, TrainingStatus } from "./types";
 
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -19,6 +19,7 @@ export interface LibraryResponse {
   characters: CharacterSummary[];
   training: TrainingStatus | null;
   trainerInstalled: boolean;
+  disk: DiskInfo | null;
 }
 
 export interface DetailResponse {

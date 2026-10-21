@@ -8,7 +8,7 @@ import sharp from "sharp";
 
 import { DATA_DIR, LORA_DIR } from "@/lib/paths";
 
-import type { Character, CharacterDetail, CharacterSummary, DatasetImage, LoraVersion, RunResult } from "./types";
+import type { Character, CharacterDetail, CharacterSummary, DatasetImage, DiskInfo, LoraVersion, RunResult } from "./types";
 
 /**
  * File-based character library. Each character is a folder kohya can train on directly:
@@ -81,6 +81,17 @@ async function updateMeta(id: string, fn: (c: Character) => Character | void): P
 }
 
 export class NotFoundError extends Error {}
+
+/** Free space on the filesystem holding DATA_DIR (the persistent volume on a cloud box). */
+export async function diskInfo(): Promise<DiskInfo | null> {
+  try {
+    const s = await fs.statfs(DATA_DIR);
+    const gb = (blocks: number | bigint) => Math.round((Number(blocks) * Number(s.bsize)) / 2 ** 30);
+    return { freeGb: gb(s.bavail), totalGb: gb(s.blocks) };
+  } catch {
+    return null;
+  }
+}
 
 export async function listImages(id: string): Promise<DatasetImage[]> {
   const c = await getCharacter(id);
