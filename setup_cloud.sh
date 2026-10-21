@@ -87,7 +87,7 @@ log "ComfyUI"
 [ -d "$COMFY/.git" ] || git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git "$COMFY"
 [ -x "$COMFY/venv/bin/python" ] || $PY -m venv "$COMFY/venv"
 CPY=$COMFY/venv/bin/python
-"$CPY" -m pip install -q -U pip wheel setuptools Cython
+"$CPY" -m pip install -q -U pip wheel "setuptools<82" Cython
 "$CPY" -m pip install -q torch torchvision torchaudio --index-url "$TORCH_INDEX"
 "$CPY" -m pip install -q -r "$COMFY/requirements.txt"
 
@@ -106,7 +106,8 @@ for repo in "${NODES[@]}"; do
   dir=$COMFY/custom_nodes/$(basename "$repo")
   if [ -d "$dir/.git" ]; then git -C "$dir" pull -q --ff-only || warn "could not update $(basename "$repo")"
   else git clone -q --depth 1 "$repo" "$dir"; fi
-  [ -f "$dir/requirements.txt" ] && "$CPY" -m pip install -q -r "$dir/requirements.txt"
+  # --no-warn-conflicts: the packs disagree on albumentations forks etc.; the graphs here don't use them.
+  [ -f "$dir/requirements.txt" ] && "$CPY" -m pip install -q --no-warn-conflicts -r "$dir/requirements.txt"
 done
 # FaceID (IPAdapter_plus) and ReActor both need insightface + an ONNX runtime on the GPU.
 "$CPY" -m pip install -q insightface==0.7.3 onnxruntime-gpu
@@ -146,6 +147,100 @@ TPY=$TRAINER/venv/bin/python
 "$TPY" -m pip install -q torch torchvision --index-url "$TORCH_INDEX"
 (cd "$TRAINER/sd-scripts" && "$TPY" -m pip install -q -r requirements.txt)
 
+# ── Launcher + updater ──────────────────────────────────────────────────────
+HIGHVRAM=""; [ "${VRAM_MB:-0}" -ge 40000 ] && HIGHVRAM="--highvram" # keep every model resident on 40 GB+ cards
+
+# Writes start_obscura.sh and update_obscura.sh into $WORKSPACE. Paths are baked in as a header;
+# the bodies are quoted heredocs, so $vars in them are evaluated when the scripts run.
+write_launchers() {
+  local header
+  header=$(printf 'WORKSPACE=%q\nCOMFY=%q\nAPP=%q\nLOGS=%q\nCPY=%q\nHIGHVRAM=%q\n' "$WORKSPACE" "$COMFY" "$APP" "$LOGS" "$CPY" "$HIGHVRAM")
+
+  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
+# Starts or restarts ComfyUI (127.0.0.1:8188), the dashboard (0.0.0.0:3000) and the auto-updater.
+#   start_obscura.sh                 (re)start everything; running instances are stopped first (a render in progress dies)
+#   start_obscura.sh dashboard       restart only the dashboard
+#   start_obscura.sh stop            stop everything
+#   start_obscura.sh stop-dashboard  stop the dashboard and the updater (before rebuilding the dashboard)
+# AUTO_UPDATE=0 disables the updater. Logs: $LOGS/*.log
+set -u
+what=${1:-all}
+mkdir -p "$LOGS"
+# Each service runs in its own session (setsid), so killing the group also gets npm's next-server child.
+# The pattern catches instances started some other way (an older launcher, or by hand).
+stop() { # stop <name> <pkill pattern>
+  local f=$LOGS/$1.pid
+  if [ -f "$f" ]; then kill -- -"$(cat "$f")" 2>/dev/null; fi
+  pkill -f "$2" 2>/dev/null
+  sleep 1
+  rm -f "$f"
+}
+launch() { # launch <name> <dir> <command...>
+  local name=$1 dir=$2; shift 2
+  (cd "$dir" && setsid nohup "$@" > "$LOGS/$name.log" 2>&1 & echo $! > "$LOGS/$name.pid")
+}
+case "$what" in
+stop)
+  stop updater "update_obscura.sh --watch"; stop dashboard "next start|next-server"; stop comfyui "python main.py --listen" ;;
+stop-dashboard)
+  stop updater "update_obscura.sh --watch"; stop dashboard "next start|next-server" ;;
+stop-dashboard-only)
+  stop dashboard "next start|next-server" ;;
+dashboard)
+  stop dashboard "next start|next-server"
+  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000 ;;
+*)
+  stop updater "update_obscura.sh --watch"; stop dashboard "next start|next-server"; stop comfyui "python main.py --listen"
+  launch comfyui "$COMFY" "$CPY" main.py --listen 127.0.0.1 --port 8188 --preview-method auto $HIGHVRAM
+  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
+  if [ "${AUTO_UPDATE:-1}" = 1 ]; then launch updater "$WORKSPACE" "$WORKSPACE/update_obscura.sh" --watch; fi
+  echo "ComfyUI → $LOGS/comfyui.log · dashboard → http://<pod>:3000 ($LOGS/dashboard.log) · updater → $LOGS/updater.log" ;;
+esac
+EOF
+  } > "$WORKSPACE/start_obscura.sh"
+
+  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
+# Pulls origin/main and, when it moved, rebuilds and restarts the dashboard only (ComfyUI and any
+# render in progress keep running). A failed build puts the previous build back.
+#   update_obscura.sh          once
+#   update_obscura.sh --watch  every 2 minutes (start_obscura.sh runs this unless AUTO_UPDATE=0)
+set -u
+stamp() { date '+%F %T'; }
+update() {
+  cd "$APP" || return 1
+  git fetch -q origin main 2>/dev/null || { echo "$(stamp) fetch failed"; return 1; }
+  local here there; here=$(git rev-parse HEAD); there=$(git rev-parse origin/main)
+  [ "$here" = "$there" ] && return 0
+  echo "$(stamp) updating ${here:0:7} → ${there:0:7}"
+  git merge -q --ff-only origin/main || { echo "$(stamp) not a fast-forward; fix the clone by hand"; return 1; }
+  rm -rf .next.prev; [ -d .next ] && cp -a .next .next.prev
+  # npm ci and next build both delete files the running server holds open; on a network volume
+  # that fails with ENOTEMPTY, so the dashboard is down for the ~1 minute this takes.
+  "$WORKSPACE/start_obscura.sh" stop-dashboard-only
+  if git diff --name-only "$here" "$there" | grep -q '^package-lock.json$'; then
+    npm ci --no-audit --no-fund --loglevel=error || { echo "$(stamp) npm ci failed"; "$WORKSPACE/start_obscura.sh" dashboard; return 1; }
+  fi
+  if npm run build; then
+    rm -rf .next.prev
+    "$WORKSPACE/start_obscura.sh" dashboard && echo "$(stamp) dashboard restarted at ${there:0:7}"
+  else
+    echo "$(stamp) build failed; restoring the previous build"
+    rm -rf .next; [ -d .next.prev ] && mv .next.prev .next
+    "$WORKSPACE/start_obscura.sh" dashboard
+    return 1
+  fi
+}
+if [ "${1:-}" = --watch ]; then
+  while true; do update; sleep 120; done
+else
+  update
+fi
+EOF
+  } > "$WORKSPACE/update_obscura.sh"
+  chmod +x "$WORKSPACE/start_obscura.sh" "$WORKSPACE/update_obscura.sh"
+}
+write_launchers
+
 # ── Obscura dashboard ───────────────────────────────────────────────────────
 log "Obscura dashboard"
 # A private repo needs the token in the clone URL (it stays in .git/config on this pod only).
@@ -171,89 +266,11 @@ DASHBOARD_PASSWORD=$PASSWORD
 EOF
   echo "Dashboard login: admin / $PASSWORD   (saved in $ENV_FILE)"
 fi
+# A running next-server keeps files in node_modules/.next open; on a network volume that leaves
+# placeholder entries behind and npm ci fails with ENOTEMPTY. Stop it (and the updater) first.
+"$WORKSPACE/start_obscura.sh" stop-dashboard
 (cd "$APP" && npm ci --no-audit --no-fund --loglevel=error && npm run build)
 
-# ── Launcher + updater ──────────────────────────────────────────────────────
-HIGHVRAM=""; [ "${VRAM_MB:-0}" -ge 40000 ] && HIGHVRAM="--highvram" # keep every model resident on 40 GB+ cards
-
-# Writes start_obscura.sh and update_obscura.sh into $WORKSPACE. Paths are baked in as a header;
-# the bodies are quoted heredocs, so $vars in them are evaluated when the scripts run.
-write_launchers() {
-  local header
-  header=$(printf 'WORKSPACE=%q\nCOMFY=%q\nAPP=%q\nLOGS=%q\nCPY=%q\nHIGHVRAM=%q\n' "$WORKSPACE" "$COMFY" "$APP" "$LOGS" "$CPY" "$HIGHVRAM")
-
-  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
-# Starts or restarts ComfyUI (127.0.0.1:8188), the dashboard (0.0.0.0:3000) and the auto-updater.
-#   start_obscura.sh            everything (running instances are stopped first; a render in progress dies)
-#   start_obscura.sh dashboard  only the dashboard (what the updater does after a rebuild)
-# AUTO_UPDATE=0 disables the updater. Logs: $LOGS/*.log
-set -u
-what=${1:-all}
-mkdir -p "$LOGS"
-# Each service runs in its own session (setsid), so killing the group also gets npm's next-server child.
-# The pattern catches instances started some other way (an older launcher, or by hand).
-stop() { # stop <name> <pkill pattern>
-  local f=$LOGS/$1.pid
-  if [ -f "$f" ]; then kill -- -"$(cat "$f")" 2>/dev/null; fi
-  pkill -f "$2" 2>/dev/null
-  sleep 1
-  rm -f "$f"
-}
-launch() { # launch <name> <dir> <command...>
-  local name=$1 dir=$2; shift 2
-  (cd "$dir" && setsid nohup "$@" > "$LOGS/$name.log" 2>&1 & echo $! > "$LOGS/$name.pid")
-}
-if [ "$what" = all ]; then
-  stop updater "update_obscura.sh --watch"; stop dashboard "next start|next-server"; stop comfyui "ComfyUI/main.py"
-  launch comfyui "$COMFY" "$CPY" main.py --listen 127.0.0.1 --port 8188 --preview-method auto $HIGHVRAM
-  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
-  if [ "${AUTO_UPDATE:-1}" = 1 ]; then launch updater "$WORKSPACE" "$WORKSPACE/update_obscura.sh" --watch; fi
-  echo "ComfyUI → $LOGS/comfyui.log · dashboard → http://<pod>:3000 ($LOGS/dashboard.log) · updater → $LOGS/updater.log"
-else
-  stop dashboard "next start|next-server"
-  launch dashboard "$APP" npm start -- -H 0.0.0.0 -p 3000
-fi
-EOF
-  } > "$WORKSPACE/start_obscura.sh"
-
-  { echo '#!/usr/bin/env bash'; echo "$header"; cat <<'EOF'
-# Pulls origin/main and, when it moved, rebuilds and restarts the dashboard only (ComfyUI and any
-# render in progress keep running). A failed build puts the previous build back.
-#   update_obscura.sh          once
-#   update_obscura.sh --watch  every 2 minutes (start_obscura.sh runs this unless AUTO_UPDATE=0)
-set -u
-stamp() { date '+%F %T'; }
-update() {
-  cd "$APP" || return 1
-  git fetch -q origin main 2>/dev/null || { echo "$(stamp) fetch failed"; return 1; }
-  local here there; here=$(git rev-parse HEAD); there=$(git rev-parse origin/main)
-  [ "$here" = "$there" ] && return 0
-  echo "$(stamp) updating ${here:0:7} → ${there:0:7}"
-  git merge -q --ff-only origin/main || { echo "$(stamp) not a fast-forward; fix the clone by hand"; return 1; }
-  rm -rf .next.prev; [ -d .next ] && cp -a .next .next.prev
-  if git diff --name-only "$here" "$there" | grep -q '^package-lock.json$'; then
-    npm ci --no-audit --no-fund --loglevel=error || { echo "$(stamp) npm ci failed"; return 1; }
-  fi
-  if npm run build; then
-    rm -rf .next.prev
-    "$WORKSPACE/start_obscura.sh" dashboard && echo "$(stamp) dashboard restarted at ${there:0:7}"
-  else
-    echo "$(stamp) build failed; restoring the previous build"
-    rm -rf .next; [ -d .next.prev ] && mv .next.prev .next
-    "$WORKSPACE/start_obscura.sh" dashboard
-    return 1
-  fi
-}
-if [ "${1:-}" = --watch ]; then
-  while true; do update; sleep 120; done
-else
-  update
-fi
-EOF
-  } > "$WORKSPACE/update_obscura.sh"
-  chmod +x "$WORKSPACE/start_obscura.sh" "$WORKSPACE/update_obscura.sh"
-}
-write_launchers
 
 log "Done"
 echo "Expose port 3000 only (RunPod: https://<pod-id>-3000.proxy.runpod.net; add it as a direct TCP port too for uploads over ~100 MB). ComfyUI stays on localhost."
