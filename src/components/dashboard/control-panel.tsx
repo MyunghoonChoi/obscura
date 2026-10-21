@@ -22,7 +22,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { trainedCheckpoint } from "@/lib/characters/api";
 import type { CharacterSummary, TrainingStatus } from "@/lib/characters/types";
-import { guessPromptStyle, MAX_FRAMES, PROMPT_STYLES, RESOLUTIONS, type PromptStyle } from "@/lib/comfy/presets";
+import { FACESWAP_MAX_FRAMES, guessPromptStyle, PROMPT_STYLES, RESOLUTIONS, UPSCALE, WAN_FPS, WAN_LENGTH, type PromptStyle } from "@/lib/comfy/presets";
 import type { GenerationMode, GenerationParams, RemixMode } from "@/lib/comfy/types";
 import { cn } from "@/lib/utils";
 
@@ -31,30 +31,31 @@ import { ParamSlider } from "./param-slider";
 import { ReferenceDrop } from "./reference-drop";
 import { SourceDrop, sourceKind } from "./source-drop";
 
+export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "upscale";
+
 export interface ComfyOptions {
   online: boolean;
   /** SDXL / Pony checkpoints (SD 1.5 files are filtered out server-side). */
   checkpoints: string[];
-  /** SDXL motion modules only. */
-  motionModules: string[];
+  /** Server-chosen default (OBSCURA_DEFAULT_CHECKPOINT, else Pony, else the first). */
+  defaultCheckpoint: string;
   samplers: string[];
   schedulers: string[];
-  remix: { missing: Record<RemixMode, string[]>; refineAvailable: boolean };
+  /** What each capability lacks on this ComfyUI; empty = ready. */
+  missing: Record<Capability, string[]>;
+  refineAvailable: boolean;
 }
 
 const REMIX_MODES: Record<RemixMode, { label: string; hint: string }> = {
   motion: {
     label: "Motion transfer",
-    hint: "Keeps the source's movement and timing. Your character, outfit and background come from the prompt.",
+    hint: "Keeps the source's pose and movement. Your character, outfit and background come from the prompt.",
   },
   faceswap: {
     label: "Face swap",
     hint: "Keeps the source exactly as filmed and puts your character's face in it.",
   },
 };
-
-/** 0 keeps the source's own frame rate. */
-const RESAMPLE_FPS = [0, 8, 12, 16, 24];
 
 interface ControlPanelProps {
   params: GenerationParams;
@@ -94,16 +95,19 @@ export function ControlPanel({
   const isMotion = isRemix && p.remixMode === "motion";
   const sourceIsVideo = isRemix && sourceKind(source) === "video";
   const isVideo = p.mode === "video" || sourceIsVideo;
-  // Face swap runs no diffusion unless the (stills-only) refine pass is on.
+  // Everything except face swap samples an SDXL still (face swap only when it refines a still).
   const samples = !isFaceSwap || (p.refineFace && !sourceIsVideo);
-  const needsMotionModule = p.mode === "video" || (isMotion && sourceIsVideo);
+  const stillOutput = !isVideo && !isFaceSwap;
 
   const character = characters.find((c) => c.id === p.characterId);
-  const characterFaces = !reference && !!character && (p.useCharacterRefs || isRemix) && character.refs.length > 0;
+  const characterFaces = !reference && !!character && (p.useCharacterRefs || isRemix || p.faceSwapAfter) && character.refs.length > 0;
   const hasFace = !!reference || characterFaces;
   const resolution = RESOLUTIONS.find((r) => r.w === p.width && r.h === p.height)?.label ?? "custom";
-  const missing = isRemix ? (options?.remix.missing[p.remixMode] ?? []) : [];
-  const maxFrames = isRemix ? MAX_FRAMES[p.remixMode] : MAX_FRAMES.video;
+
+  const capability: Capability | null =
+    p.mode === "video" ? "video" : isFaceSwap ? "faceswap" : isMotion ? (sourceIsVideo ? "motionVideo" : "motion") : null;
+  const missing = capability ? (options?.missing[capability] ?? []) : [];
+  const upscaleMissing = options?.missing.upscale ?? [];
 
   const blocker =
     !options?.online || !!training
@@ -111,7 +115,7 @@ export function ControlPanel({
       : isRemix && !source
         ? "Drop a source clip or photo."
         : missing.length
-          ? "This ComfyUI is missing Remix models."
+          ? "This ComfyUI is missing models for this mode."
           : isFaceSwap && !hasFace
             ? "Face swap needs a character with starred photos, or a one-off face."
             : null;
@@ -153,22 +157,29 @@ export function ControlPanel({
             ))}
           </div>
           <p className="text-[11px] leading-snug text-muted-foreground">{REMIX_MODES[p.remixMode].hint}</p>
-          {missing.length > 0 && (
-            <p className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200">
-              <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                This ComfyUI is missing {missing.join("; ")}. Run <code className="font-mono">setup_cloud.sh</code> on the GPU
-                box.
-              </span>
-            </p>
-          )}
         </div>
+      )}
+
+      {p.mode === "video" && (
+        <p className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-[11px] leading-snug text-muted-foreground">
+          A finished SDXL still of your character (LoRA, FaceID, face swap) becomes frame 1; Wan 2.1 animates it from the prompt.
+          720p, {WAN_FPS} fps.
+        </p>
+      )}
+
+      {missing.length > 0 && (
+        <p className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-200">
+          <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            This ComfyUI is missing {missing.join("; ")}. Run <code className="font-mono">setup_cloud.sh</code> on the GPU box.
+          </span>
+        </p>
       )}
 
       {samples && (
         <div className="space-y-2">
           <Label htmlFor="prompt" className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            {isMotion ? "Outfit, background & style" : isFaceSwap ? "Face refine prompt (optional)" : "Prompt"}
+            {p.mode === "video" ? "Scene & motion" : isMotion ? "Outfit, background & style" : isFaceSwap ? "Face refine prompt (optional)" : "Prompt"}
           </Label>
           <Textarea
             id="prompt"
@@ -178,14 +189,21 @@ export function ControlPanel({
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !busy && !blocker) onGenerate();
             }}
             placeholder={
-              isMotion
-                ? "wearing a black leather jacket, rainy neon street at night, cinematic lighting, film grain…"
-                : isFaceSwap
-                  ? "detailed skin, natural lighting…"
-                  : "cinematic close-up of a woman walking through neon rain, film grain, shallow depth of field…"
+              p.mode === "video"
+                ? "a woman in a black coat walks slowly through neon rain, turns toward the camera and smiles, cinematic lighting"
+                : isMotion
+                  ? "wearing a black leather jacket, rainy neon street at night, cinematic lighting, film grain…"
+                  : isFaceSwap
+                    ? "detailed skin, natural lighting…"
+                    : "cinematic close-up of a woman walking through neon rain, film grain, shallow depth of field…"
             }
             className="min-h-28 resize-none text-sm leading-relaxed"
           />
+          {p.mode === "video" && (
+            <p className="text-[11px] text-muted-foreground">
+              Write it as a sentence: the still is sampled from it like an image prompt, and Wan reads it for the movement.
+            </p>
+          )}
           <details className="group">
             <summary className="cursor-pointer text-xs text-muted-foreground select-none hover:text-foreground">
               Negative prompt
@@ -255,7 +273,7 @@ export function ControlPanel({
             {!!character.activeVersion && samples && (
               <ParamSlider
                 label="LoRA strength"
-                hint="How strongly the character LoRA applies. 0.7–0.9 is typical; raise it if the face drifts, lower it if everything looks over-baked."
+                hint="How strongly the character LoRA applies. 0.8–1.0 is typical; raise it if the face drifts, lower it if skin and lighting look over-baked."
                 value={p.loraStrength}
                 min={0}
                 max={1.5}
@@ -313,8 +331,8 @@ export function ControlPanel({
             <span>
               Finish with a face swap
               <span className="block text-[11px] text-muted-foreground">
-                Pastes the reference face onto the result (ReActor), so the likeness doesn&apos;t depend on the LoRA.
-                {!isVideo && " Stills get the face refine pass too."}
+                Pastes the reference face onto the {isVideo ? "first frame, which Wan then carries through the clip" : "result"}{" "}
+                (ReActor), so the likeness doesn&apos;t depend on the LoRA.{!isVideo && " Stills get the face refine pass too."}
               </span>
             </span>
             <input
@@ -331,51 +349,55 @@ export function ControlPanel({
 
       <div className="space-y-5">
         {isMotion && (
-          <>
-            <ParamSlider
-              label="Pose strength"
-              hint="How tightly the result follows the source's pose (OpenPose ControlNet). 0.7–1.0 is typical."
-              value={p.controlStrength}
-              min={0.3}
-              max={1.5}
-              step={0.05}
-              format={(v) => v.toFixed(2)}
-              onChange={(controlStrength) => setParams({ controlStrength })}
-            />
-            <ParamSlider
-              label="New look"
-              hint="1.0 redraws everything from your prompt. Lower values start from the source frames and keep more of their colours and layout."
-              value={p.denoise}
-              min={0.3}
-              max={1}
-              step={0.05}
-              format={(v) => v.toFixed(2)}
-              onChange={(denoise) => setParams({ denoise })}
-            />
-          </>
+          <ParamSlider
+            label="Pose strength"
+            hint={
+              sourceIsVideo
+                ? "How tightly Wan VACE follows the source's movement. 0.8–1.0 is typical."
+                : "How tightly the still follows the source's pose (OpenPose ControlNet). 0.7–1.0 is typical."
+            }
+            value={p.controlStrength}
+            min={0.3}
+            max={1.5}
+            step={0.05}
+            format={(v) => v.toFixed(2)}
+            onChange={(controlStrength) => setParams({ controlStrength })}
+          />
+        )}
+        {isMotion && !sourceIsVideo && (
+          <ParamSlider
+            label="New look"
+            hint="1.0 redraws everything from your prompt. Lower values start from the source photo and keep more of its colours and layout."
+            value={p.denoise}
+            min={0.3}
+            max={1}
+            step={0.05}
+            format={(v) => v.toFixed(2)}
+            onChange={(denoise) => setParams({ denoise })}
+          />
         )}
         {isFaceSwap && (
           <div className="space-y-3">
             <label
               className={cn(
                 "flex cursor-pointer items-center justify-between gap-3 text-xs",
-                (sourceIsVideo || !options?.remix.refineAvailable) && "cursor-not-allowed opacity-50",
+                (sourceIsVideo || !options?.refineAvailable) && "cursor-not-allowed opacity-50",
               )}
             >
               <span>
                 Refine the face with the character LoRA
                 <span className="block text-[11px] text-muted-foreground">
                   {sourceIsVideo
-                    ? "Stills only: re-sampling every frame would make the face flicker."
-                    : options?.remix.refineAvailable
+                    ? "Clips use FaceBoost instead: the face is restored before pasting, with no per-frame re-sampling, so it doesn't flicker."
+                    : options?.refineAvailable
                       ? "FaceDetailer redraws the swapped face for skin detail and likeness."
                       : "Needs Impact Pack + a face detector (setup_cloud.sh)."}
                 </span>
               </span>
               <input
                 type="checkbox"
-                checked={p.refineFace && !sourceIsVideo && !!options?.remix.refineAvailable}
-                disabled={sourceIsVideo || !options?.remix.refineAvailable}
+                checked={p.refineFace && !sourceIsVideo && !!options?.refineAvailable}
+                disabled={sourceIsVideo || !options?.refineAvailable}
                 onChange={(e) => setParams({ refineFace: e.target.checked })}
                 className="size-4 accent-primary"
               />
@@ -392,13 +414,25 @@ export function ControlPanel({
                 onChange={(refineDenoise) => setParams({ refineDenoise })}
               />
             )}
+            {sourceIsVideo && (
+              <ParamSlider
+                label="Frame cap"
+                hint={`Frames read from the source, up to ${FACESWAP_MAX_FRAMES}. Longer clips are cut here, so split them first.`}
+                value={p.remixFrameCap || FACESWAP_MAX_FRAMES}
+                min={8}
+                max={FACESWAP_MAX_FRAMES}
+                step={8}
+                format={(v) => (v >= FACESWAP_MAX_FRAMES ? `${v} (max)` : String(v))}
+                onChange={(remixFrameCap) => setParams({ remixFrameCap })}
+              />
+            )}
           </div>
         )}
         {samples && (
           <>
             <ParamSlider
               label="CFG"
-              hint="How strictly to follow the prompt. SDXL likes 4–7; Pony 6–8. Too high looks burnt."
+              hint="How strictly the SDXL still follows the prompt. SDXL likes 4–7; Pony 6–8. Video motion uses Wan's own settings."
               value={p.cfg}
               min={1}
               max={15}
@@ -408,7 +442,7 @@ export function ControlPanel({
             />
             <ParamSlider
               label="Steps"
-              hint="Sampling steps per pass. 25–35 is the sweet spot for SDXL."
+              hint="Sampling steps of the SDXL still, the upscale tiles and the face refine. 25–35 is the sweet spot."
               value={p.steps}
               min={10}
               max={80}
@@ -417,79 +451,51 @@ export function ControlPanel({
             />
           </>
         )}
-        {samples && !isFaceSwap && (
-          <div className="grid grid-cols-2 gap-4">
-            <ParamSlider
-              label="Hires fix"
-              hint="Upscales the latent and samples a second pass for sharper detail. 1.0 = off. Clips cap at 1.5×."
-              value={p.hiresScale}
-              min={1}
-              max={isVideo ? 1.5 : 2}
-              step={0.25}
-              format={(v) => (v > 1 ? `${v.toFixed(2)}×` : "off")}
-              onChange={(hiresScale) => setParams({ hiresScale })}
-            />
-            <ParamSlider
-              label="Hires denoise"
-              hint="How much the second pass may change. 0.35–0.5 sharpens without drifting."
-              value={p.hiresDenoise}
-              min={0.2}
-              max={0.7}
-              step={0.05}
-              format={(v) => v.toFixed(2)}
-              onChange={(hiresDenoise) => setParams({ hiresDenoise })}
-              disabled={p.hiresScale <= 1}
-            />
-          </div>
-        )}
-        {isVideo && (
-          <div className="grid grid-cols-2 gap-4">
-            <ParamSlider
-              label={isRemix ? "Frame cap" : "Frames"}
-              hint={
-                isRemix
-                  ? `Frames read from the source after resampling, up to ${maxFrames}. Longer clips are cut here, so split them first.`
-                  : "Total frames. AnimateDiff renders them in overlapping windows, so length is limited by time, not the model."
-              }
-              // Remix defaults to the whole clip (0 = up to the cap); dragging sets an explicit cap.
-              value={isRemix ? p.remixFrameCap || maxFrames : p.frames}
-              min={8}
-              max={maxFrames}
-              step={8}
-              format={isRemix ? (v) => (v >= maxFrames ? `${v} (max)` : String(v)) : undefined}
-              onChange={(v) => setParams(isRemix ? { remixFrameCap: v } : { frames: v })}
-            />
-            {p.mode === "video" ? (
+        {stillOutput && samples && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-4">
               <ParamSlider
-                label="FPS"
-                hint="Playback frame rate of the encoded MP4."
-                value={p.fps}
-                min={4}
-                max={30}
-                step={1}
-                onChange={(fps) => setParams({ fps })}
+                label="Upscale"
+                hint="Pixel upscale with 4x-UltraSharp, then UltimateSDUpscale re-samples 1024 px tiles with the character model, so detail is resolved rather than invented. 2× of 832×1216 ≈ 1664×2432."
+                value={p.upscale}
+                min={UPSCALE.min}
+                max={UPSCALE.max}
+                step={UPSCALE.step}
+                format={(v) => (v > 1 ? `${v}×` : "off")}
+                onChange={(upscale) => setParams({ upscale })}
               />
-            ) : isMotion ? (
-              <Field label="Resample to">
-                <Select value={String(p.fps)} onValueChange={(v) => setParams({ fps: Number(v) })}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue>{p.fps ? `${p.fps} fps` : "Source fps"}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {RESAMPLE_FPS.map((f) => (
-                      <SelectItem key={f} value={String(f)}>
-                        {f ? `${f} fps` : "Source fps"}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-            ) : (
-              <p className="self-end text-[11px] text-muted-foreground">
-                Keeps the source&apos;s fps and audio. Frames over 1920 px are scaled down.
-              </p>
+              <ParamSlider
+                label="Upscale denoise"
+                hint="How much each tile may change. 0.25–0.35 adds detail; higher starts redrawing."
+                value={p.upscaleDenoise}
+                min={0.1}
+                max={0.6}
+                step={0.05}
+                format={(v) => v.toFixed(2)}
+                onChange={(upscaleDenoise) => setParams({ upscaleDenoise })}
+                disabled={p.upscale <= 1}
+              />
+            </div>
+            {p.upscale > 1 && upscaleMissing.length > 0 && (
+              <p className="text-[11px] text-amber-300">Upscale will be skipped: missing {upscaleMissing.join("; ")}.</p>
             )}
           </div>
+        )}
+        {isVideo && !isFaceSwap && (
+          <ParamSlider
+            label="Length"
+            hint={
+              sourceIsVideo
+                ? `Length of the generated clip. The source is resampled to ${WAN_FPS} fps and cut here; 81 frames (5 s) is what Wan was trained on.`
+                : `Wan clip length at ${WAN_FPS} fps. 81 frames (5 s) is what the model was trained on; longer drifts more.`
+            }
+            value={p.frames}
+            min={WAN_LENGTH.min}
+            max={WAN_LENGTH.max}
+            step={4}
+            format={(v) => `${v} f · ${(v / WAN_FPS).toFixed(1)} s`}
+            onChange={(frames) => setParams({ frames })}
+          />
         )}
       </div>
 
@@ -525,18 +531,8 @@ export function ControlPanel({
             <OptionSelect value={p.sampler} items={options?.samplers ?? [p.sampler]} onChange={(sampler) => setParams({ sampler })} />
           </Field>
         )}
-        {needsMotionModule && (
-          <Field label="Motion module" className="col-span-2">
-            <OptionSelect
-              value={options?.motionModules.includes(p.motionModule) ? p.motionModule : ""}
-              items={options?.motionModules ?? []}
-              placeholder="No SDXL motion module installed"
-              onChange={(motionModule) => setParams({ motionModule })}
-            />
-          </Field>
-        )}
         {!isRemix && (
-          <Field label="Resolution" className="col-span-2">
+          <Field label={p.mode === "video" ? "Aspect" : "Resolution"} className="col-span-2">
             <Select
               value={resolution}
               onValueChange={(v) => {
@@ -550,7 +546,7 @@ export function ControlPanel({
               <SelectContent>
                 {RESOLUTIONS.map((r) => (
                   <SelectItem key={r.label} value={r.label}>
-                    {r.label} <span className="text-muted-foreground">{r.w}×{r.h}</span>
+                    {r.label} <span className="text-muted-foreground">{p.mode === "video" ? "" : `${r.w}×${r.h}`}</span>
                   </SelectItem>
                 ))}
               </SelectContent>

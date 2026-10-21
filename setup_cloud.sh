@@ -7,7 +7,11 @@
 #
 #   bash setup_cloud.sh                         # provision, then start ComfyUI + dashboard
 #   START=0 bash setup_cloud.sh                 # provision only
-#   WITH_PONY=0 HOTSHOT=0 bash setup_cloud.sh   # skip optional models
+#   WITH_PONY=0 bash setup_cloud.sh             # skip optional models
+#   WAN_PRECISION=fp8 bash setup_cloud.sh       # 16 GB Wan I2V instead of 33 GB (48 GB cards / small volumes)
+#
+# Disk: about 95 GB of models with WAN_PRECISION=fp16 (80 GB with fp8) plus ~20 GB of environments.
+# Use a 200 GB volume; the script stops before a download that wouldn't fit.
 #
 # Environment (all optional):
 #   WORKSPACE           persistent root (RunPod network volume)              default /workspace
@@ -18,7 +22,7 @@
 #   CIVITAI_TOKEN       for Civitai downloads that require login
 #   HF_TOKEN            for gated Hugging Face files
 #   WITH_PONY=1         also fetch Pony Diffusion V6 XL (Civitai)
-#   HOTSHOT=1           also fetch HotshotXL (8-frame SDXL motion module)
+#   WAN_PRECISION=fp16  Wan 2.1 I2V weights: fp16 (33 GB, best) or fp8 (16 GB)
 #   START=1             launch ComfyUI (127.0.0.1:8188) + dashboard (0.0.0.0:3000) when done
 #   AUTO_UPDATE=1       also run update_obscura.sh --watch: redeploys the dashboard ~2 min after a push
 set -euo pipefail
@@ -31,7 +35,7 @@ DATA=$WORKSPACE/characters
 LOGS=$WORKSPACE/logs
 OBSCURA_REPO=${OBSCURA_REPO:-https://github.com/MyunghoonChoi/obscura.git}
 WITH_PONY=${WITH_PONY:-1}
-HOTSHOT=${HOTSHOT:-1}
+WAN_PRECISION=${WAN_PRECISION:-fp16}
 START=${START:-1}
 PY=${PYTHON:-python3}
 
@@ -68,10 +72,15 @@ VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/d
 echo "driver CUDA ${DRIVER_CUDA:0:2}.${DRIVER_CUDA:2} → torch $TORCH_CUDA · VRAM ${VRAM_MB:-?} MB"
 
 # ── Downloads (resumable, skipped when present) ─────────────────────────────
-fetch() { # fetch <url> <dest-file>
-  local url=$1 dest=$2
+fetch() { # fetch <url> <dest-file> [size-GB]   (size enables a free-space check before downloading)
+  local url=$1 dest=$2 size=${3:-0}
   if [ -s "$dest" ] && [ ! -e "$dest.aria2" ]; then echo "  ✓ $(basename "$dest")"; return; fi
   mkdir -p "$(dirname "$dest")"
+  local free; free=$(df -BG --output=avail "$(dirname "$dest")" 2>/dev/null | tail -1 | tr -dc '0-9')
+  if [ "${free:-0}" -lt $((size + 5)) ]; then
+    echo "!! $(basename "$dest") needs ~${size} GB but only ${free:-?} GB is free. Grow the volume (RunPod → Storage), then re-run." >&2
+    exit 1
+  fi
   local auth=()
   if [[ $url == *huggingface.co* && -n ${HF_TOKEN:-} ]]; then auth=(--header="Authorization: Bearer $HF_TOKEN"); fi
   if [[ $url == *civitai.com* && -n ${CIVITAI_TOKEN:-} ]]; then
@@ -94,18 +103,21 @@ CPY=$COMFY/venv/bin/python
 log "Custom nodes"
 NODES=(
   https://github.com/cubiq/ComfyUI_IPAdapter_plus            # FaceID Plus v2
-  https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved # SDXL motion modules
   https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite    # load/encode video, keeps audio
   https://github.com/Fannovel16/comfyui_controlnet_aux       # DWPose
   https://github.com/ltdrdata/ComfyUI-Impact-Pack            # FaceDetailer
   https://github.com/ltdrdata/ComfyUI-Impact-Subpack         # Ultralytics face detector
-  https://github.com/Gourieff/ComfyUI-ReActor                # face swap
+  https://github.com/Gourieff/ComfyUI-ReActor                # face swap + FaceBoost
+  https://github.com/ssitu/ComfyUI_UltimateSDUpscale         # tiled pixel upscale (has a submodule)
 )
+# AnimateDiff is retired (Wan 2.1 does video now); drop its pack and motion modules if an older run left them.
+rm -rf "$COMFY/custom_nodes/ComfyUI-AnimateDiff-Evolved"
+rm -f "$COMFY/models/animatediff_models/mm_sdxl_v10_beta.ckpt" "$COMFY/models/animatediff_models/hsxl_temporal_layers.safetensors"
 export SAM2_BUILD_CUDA=0 # Impact Pack pulls sam2; its optional CUDA extension isn't needed here
 for repo in "${NODES[@]}"; do
   dir=$COMFY/custom_nodes/$(basename "$repo")
-  if [ -d "$dir/.git" ]; then git -C "$dir" pull -q --ff-only || warn "could not update $(basename "$repo")"
-  else git clone -q --depth 1 "$repo" "$dir"; fi
+  if [ -d "$dir/.git" ]; then git -C "$dir" pull -q --ff-only --recurse-submodules || warn "could not update $(basename "$repo")"
+  else git clone -q --depth 1 --recursive "$repo" "$dir"; fi
   # --no-warn-conflicts: the packs disagree on albumentations forks etc.; the graphs here don't use them.
   [ -f "$dir/requirements.txt" ] && "$CPY" -m pip install -q --no-warn-conflicts -r "$dir/requirements.txt"
 done
@@ -128,9 +140,20 @@ fetch "$HF/hr16/DWPose-TorchScript-BatchSize5/resolve/main/dw-ll_ucoco_384_bs5.t
 fetch "$HF/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl.bin"               "$M/ipadapter/ip-adapter-faceid-plusv2_sdxl.bin"
 fetch "$HF/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid-plusv2_sdxl_lora.safetensors"  "$M/loras/ip-adapter-faceid-plusv2_sdxl_lora.safetensors"
 fetch "$HF/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors"                 "$M/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-# Video: SDXL AnimateDiff (16-frame windows) + HotshotXL (8-frame windows)
-fetch "$HF/guoyww/animatediff/resolve/main/mm_sdxl_v10_beta.ckpt"                              "$M/animatediff_models/mm_sdxl_v10_beta.ckpt"
-[ "$HOTSHOT" = 1 ] && fetch "$HF/hotshotco/Hotshot-XL/resolve/main/hsxl_temporal_layers.safetensors" "$M/animatediff_models/hsxl_temporal_layers.safetensors"
+# Stills: pixel upscaler + tile ControlNet for UltimateSDUpscale
+fetch "$HF/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth"                                   "$M/upscale_models/4x-UltraSharp.pth" 1
+fetch "$HF/xinsir/controlnet-tile-sdxl-1.0/resolve/main/diffusion_pytorch_model.safetensors"     "$M/controlnet/controlnet-tile-sdxl-xinsir.safetensors" 3
+# Video: Wan 2.1 14B — I2V 720p for the Video tab, VACE for motion transfer — plus the shared encoders
+WAN=$HF/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files
+case "$WAN_PRECISION" in
+  fp8) I2V=wan2.1_i2v_720p_14B_fp8_scaled.safetensors; I2V_GB=17 ;;
+  *)   I2V=wan2.1_i2v_720p_14B_fp16.safetensors;       I2V_GB=33 ;;
+esac
+fetch "$WAN/diffusion_models/$I2V"                                   "$M/diffusion_models/$I2V" "$I2V_GB"
+fetch "$WAN/diffusion_models/wan2.1_vace_14B_fp16.safetensors"       "$M/diffusion_models/wan2.1_vace_14B_fp16.safetensors" 35
+fetch "$WAN/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"    "$M/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" 7
+fetch "$WAN/vae/wan_2.1_vae.safetensors"                             "$M/vae/wan_2.1_vae.safetensors" 1
+fetch "$WAN/clip_vision/clip_vision_h.safetensors"                   "$M/clip_vision/clip_vision_h.safetensors" 2
 # Face swap: HyperSwap 256 (preferred) + inswapper 128 (fallback), restorers, face detector
 fetch "$HF/facefusion/models-3.3.0/resolve/main/hyperswap_1b_256.onnx"                         "$M/hyperswap/hyperswap_1b_256.onnx"
 fetch "$HF/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx"                   "$M/insightface/inswapper_128.onnx"

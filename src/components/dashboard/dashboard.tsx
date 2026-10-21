@@ -22,10 +22,11 @@ const PARAMS_KEY = "obscura:params";
 const OFFLINE: ComfyOptions = {
   online: false,
   checkpoints: [],
-  motionModules: [],
+  defaultCheckpoint: "",
   samplers: [],
   schedulers: [],
-  remix: { missing: { motion: [], faceswap: [] }, refineAvailable: false },
+  missing: { video: [], motion: [], motionVideo: [], faceswap: [], upscale: [] },
+  refineAvailable: false,
 };
 
 export function Dashboard() {
@@ -86,8 +87,9 @@ export function Dashboard() {
       setCharacters(chars);
       setTraining(lib?.training ?? null);
       setDisk(lib?.disk ?? null);
+      // Last-used checkpoint if still installed, else the server-chosen default (never "whatever sorts first").
       const pick = (current: string | undefined, list: string[]) =>
-        current && list.includes(current) ? current : (list[0] ?? "");
+        current && list.includes(current) ? current : opts.defaultCheckpoint || list[0] || "";
       const fromUrl = chars.find((c) => c.id === urlCharacter);
       const characterId = fromUrl?.id ?? (chars.some((c) => c.id === saved.characterId) ? saved.characterId! : "");
       const checkpoint = trainedCheckpoint(fromUrl, opts.checkpoints) ?? pick(saved.checkpoint, opts.checkpoints);
@@ -99,7 +101,6 @@ export function Dashboard() {
         ...(!sdxlSize && { width: DEFAULT_PARAMS.width, height: DEFAULT_PARAMS.height }),
         checkpoint,
         promptStyle: saved.checkpoint === checkpoint && saved.promptStyle ? saved.promptStyle : guessPromptStyle(checkpoint),
-        motionModule: pick(saved.motionModule, opts.motionModules),
         characterId,
         loraStrength: fromUrl?.loraStrength ?? saved.loraStrength ?? DEFAULT_PARAMS.loraStrength,
         useCharacterRefs: fromUrl ? !fromUrl.activeVersion : (saved.useCharacterRefs ?? DEFAULT_PARAMS.useCharacterRefs),

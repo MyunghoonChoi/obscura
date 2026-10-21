@@ -1,27 +1,26 @@
 import { listNodeOptions } from "@/lib/comfy/client";
-import { remixAvailability, sdxlCheckpoints } from "@/lib/comfy/models";
-import { isSdxlMotionModule } from "@/lib/comfy/presets";
+import { defaultCheckpoint, pipelineAvailability, sdxlCheckpoints } from "@/lib/comfy/models";
 
 export const runtime = "nodejs";
 
 /**
  * GET /api/comfy/options — dropdowns read live from ComfyUI's /object_info, filtered to what the
- * SDXL pipeline can use, plus which Remix modes are ready on this ComfyUI.
+ * SDXL pipeline can use, the configured default checkpoint, and what each capability is missing.
  */
 export async function GET() {
-  const [checkpoints, motionModules, samplers, schedulers, remix] = await Promise.all([
+  const [checkpoints, samplers, schedulers, availability] = await Promise.all([
     sdxlCheckpoints(),
-    listNodeOptions("ADE_AnimateDiffLoaderGen1", "model_name"),
     listNodeOptions("KSampler", "sampler_name"),
     listNodeOptions("KSampler", "scheduler"),
-    remixAvailability(),
+    pipelineAvailability(),
   ]);
   return Response.json({
     online: samplers.length > 0,
     checkpoints,
-    motionModules: motionModules.filter(isSdxlMotionModule),
+    defaultCheckpoint: defaultCheckpoint(checkpoints),
     samplers,
     schedulers,
-    remix: { missing: remix.missing, refineAvailable: remix.refineAvailable },
+    missing: availability.missing,
+    refineAvailable: availability.refineAvailable,
   });
 }

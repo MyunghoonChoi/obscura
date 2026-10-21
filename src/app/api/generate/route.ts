@@ -3,8 +3,8 @@ import path from "node:path";
 
 import { getCharacter, imagePath } from "@/lib/characters/store";
 import { ComfyError, listNodeOptions, queuePrompt, uploadImage } from "@/lib/comfy/client";
-import { checkpointFamily, remixAvailability } from "@/lib/comfy/models";
-import { isSdxlMotionModule, MAX_FRAMES, MAX_SOURCE_BYTES, PROMPT_STYLES } from "@/lib/comfy/presets";
+import { checkpointFamily, pipelineAvailability, type Capability } from "@/lib/comfy/models";
+import { FACESWAP_MAX_FRAMES, guessPromptStyle, MAX_SOURCE_BYTES, PROMPT_STYLES, snapWanLength, UPSCALE } from "@/lib/comfy/presets";
 import { DEFAULT_PARAMS, type ComfyFileRef, type GenerationParams } from "@/lib/comfy/types";
 import { buildWorkflow, type BuildInput, type CharacterBinding } from "@/lib/comfy/workflow";
 import { getTrainingStatus } from "@/lib/training/runner";
@@ -20,9 +20,10 @@ const VIDEO_EXT = /\.(mp4|webm|mov|mkv|m4v)$/i;
  *   reference — optional one-off face image (overrides the character's starred faces)
  *   source    — Remix source (image or video), required when params.mode === "remix"
  *
- * Uploads files to ComfyUI, checks compatibility (SDXL checkpoint, SDXL motion module, SDXL LoRA,
- * installed Remix models), builds the graph, enqueues it and returns immediately with
- * { promptId, clientId, labels, seed, width, height, warnings }. Progress streams from /api/jobs/{promptId}/stream.
+ * Uploads files to ComfyUI, checks what the request needs against what this ComfyUI has installed
+ * (SDXL checkpoint, Wan models, swap / upscale models), builds the graph, enqueues it and returns
+ * immediately with { promptId, clientId, labels, seed, width, height, warnings }. Progress streams
+ * from /api/jobs/{promptId}/stream.
  */
 export async function POST(req: Request) {
   try {
@@ -49,24 +50,25 @@ export async function POST(req: Request) {
       const named = new File([sourceFile], `${Date.now()}-${sourceFile.name.replace(/[^\w.-]/g, "_")}`, { type: sourceFile.type });
       source = { kind, file: await uploadImage(named, "obscura/remix") };
     }
-    const isVideo = params.mode === "video" || source?.kind === "video";
-    if (isVideo && !isFaceSwap) {
-      if (!params.motionModule) return bad("Pick an SDXL motion module (mm_sdxl_v10_beta or HotshotXL).");
-      if (!isSdxlMotionModule(params.motionModule)) return bad(`${params.motionModule} isn't an SDXL motion module.`);
-    }
 
-    // ── Remix models ──
-    let models: BuildInput["models"];
-    if (isRemix) {
-      const remix = await remixAvailability();
-      const missing = remix.missing[params.remixMode];
+    // ── What this job needs, against what's installed ──
+    const availability = await pipelineAvailability();
+    const needs: Capability[] =
+      params.mode === "video" ? ["video"] : isFaceSwap ? ["faceswap"] : isRemix ? [source!.kind === "video" ? "motionVideo" : "motion"] : [];
+    for (const cap of needs) {
+      const missing = availability.missing[cap];
       if (missing.length) return bad(`This ComfyUI is missing: ${missing.join("; ")}. Run setup_cloud.sh.`);
-      if (isFaceSwap && params.refineFace && !remix.refineAvailable) params.refineFace = false;
-      models = remix.models;
     }
+    const models = availability.models;
+    const warnings: string[] = [];
+    const wantsUpscale = params.upscale > 1 && (params.mode === "image" || (isRemix && !isFaceSwap && source!.kind === "image"));
+    if (wantsUpscale && availability.missing.upscale.length) {
+      warnings.push(`Upscale skipped: missing ${availability.missing.upscale.join("; ")} (run setup_cloud.sh).`);
+      params.upscale = 1;
+    }
+    if (isFaceSwap && params.refineFace && !availability.refineAvailable) params.refineFace = false;
 
     // ── Identity: one-off face reference, or the character's LoRA + starred faces ──
-    const warnings: string[] = [];
     const faces: ComfyFileRef[] = [];
     const file = form.get("reference");
     if (file instanceof File && file.size > 0) {
@@ -88,13 +90,8 @@ export async function POST(req: Request) {
     }
     if (isFaceSwap && !faces.length)
       return bad("Face swap needs a face: pick a character with starred photos, or drop a one-off face reference.");
-
-    // Image/Video and motion transfer can finish with a face swap; without a swap model it's skipped with a note.
-    if (!isFaceSwap && params.faceSwapAfter && faces.length) {
-      const available = models ?? (await remixAvailability()).models;
-      if (available.swapModel) models = available;
-      else warnings.push("Face swap finish skipped: no swap model installed (run setup_cloud.sh).");
-    }
+    if (!isFaceSwap && params.faceSwapAfter && faces.length && !models.swapModel)
+      warnings.push("Face swap finish skipped: no swap model installed (run setup_cloud.sh).");
 
     const { workflow, labels, seed, width, height } = buildWorkflow(params, { faces, character, source, models });
     const clientId = crypto.randomUUID();
@@ -110,7 +107,7 @@ const MAX_CHARACTER_FACES = 4;
 const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
 
 /**
- * Character → LoRA name as ComfyUI lists it, plus its starred images uploaded as FaceID references.
+ * Character → LoRA name as ComfyUI lists it, plus its starred images uploaded as FaceID / swap references.
  * LoRAs trained before the SDXL switch (SD 1.5) can't load into an SDXL UNet: they're skipped with a
  * warning and the starred faces carry the identity instead.
  */
@@ -170,26 +167,22 @@ function sanitize(input: Partial<GenerationParams>): GenerationParams {
   };
   const mode = p.mode === "video" || p.mode === "remix" ? p.mode : "image";
   const remixMode = p.remixMode === "faceswap" ? "faceswap" : "motion";
-  const isVideoish = mode === "video" || mode === "remix";
   return {
     ...p,
     mode,
     remixMode,
     prompt: String(p.prompt ?? ""),
     negativePrompt: String(p.negativePrompt ?? ""),
-    promptStyle: p.promptStyle in PROMPT_STYLES ? p.promptStyle : "none",
+    // An explicit style is respected; when the client sends none, the checkpoint decides (Pony → score tags).
+    promptStyle: input.promptStyle && input.promptStyle in PROMPT_STYLES ? input.promptStyle : guessPromptStyle(String(p.checkpoint ?? "")),
     width: Math.round(clamp(p.width, 512, 2048, DEFAULT_PARAMS.width)),
     height: Math.round(clamp(p.height, 512, 2048, DEFAULT_PARAMS.height)),
     steps: Math.round(clamp(p.steps, 1, 150, DEFAULT_PARAMS.steps)),
     cfg: clamp(p.cfg, 1, 30, DEFAULT_PARAMS.cfg),
     seed: Math.round(clamp(p.seed, -1, 2 ** 48, -1)),
-    frames: Math.round(clamp(p.frames, 1, MAX_FRAMES.video, DEFAULT_PARAMS.frames)),
-    // Generated video needs a real playback rate; Remix motion transfer uses 0 for "keep the source's fps".
-    fps: Math.round(clamp(p.fps, mode === "video" ? 1 : 0, 60, DEFAULT_PARAMS.fps)),
-    remixFrameCap: Math.round(clamp(p.remixFrameCap, 0, MAX_FRAMES[remixMode], 0)),
-    // A second pass over every frame of a clip is expensive even on an A100, so clips cap at 1.5×.
-    hiresScale: clamp(p.hiresScale, 1, isVideoish ? 1.5 : 2, 1),
-    hiresDenoise: clamp(p.hiresDenoise, 0.1, 0.8, DEFAULT_PARAMS.hiresDenoise),
+    frames: snapWanLength(clamp(p.frames, 1, 10000, DEFAULT_PARAMS.frames)),
+    upscale: Math.round(clamp(p.upscale, UPSCALE.min, UPSCALE.max, UPSCALE.defaultFactor) / UPSCALE.step) * UPSCALE.step,
+    upscaleDenoise: clamp(p.upscaleDenoise, 0.1, 0.6, UPSCALE.defaultDenoise),
     identityWeight: clamp(p.identityWeight, 0, 2, DEFAULT_PARAMS.identityWeight),
     characterId: typeof p.characterId === "string" ? p.characterId : "",
     loraStrength: clamp(p.loraStrength, 0, 1.5, DEFAULT_PARAMS.loraStrength),
@@ -199,6 +192,7 @@ function sanitize(input: Partial<GenerationParams>): GenerationParams {
     denoise: clamp(p.denoise, 0.3, 1, 1),
     refineFace: p.refineFace !== false,
     refineDenoise: clamp(p.refineDenoise, 0.1, 0.7, DEFAULT_PARAMS.refineDenoise),
+    remixFrameCap: Math.round(clamp(p.remixFrameCap, 0, FACESWAP_MAX_FRAMES, 0)),
     sourceWidth: Math.round(clamp(p.sourceWidth, 0, 8192, 0)),
     sourceHeight: Math.round(clamp(p.sourceHeight, 0, 8192, 0)),
   };

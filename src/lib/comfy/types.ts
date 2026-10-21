@@ -1,6 +1,7 @@
 // Shared types between the dashboard UI and the ComfyUI proxy routes.
 
 import type { GenerationMode, PromptStyle, RemixMode } from "./presets";
+import { UPSCALE, WAN_LENGTH } from "./presets";
 
 export type { GenerationMode, PromptStyle, RemixMode } from "./presets";
 
@@ -13,27 +14,25 @@ export interface GenerationParams {
    */
   prompt: string;
   negativePrompt: string;
-  /** An SDXL / Pony checkpoint. */
+  /** An SDXL / Pony checkpoint: every still, including the first frame of every video, comes from it. */
   checkpoint: string;
   /** Fine-tune prompt conventions (e.g. Pony score tags + clip skip). */
   promptStyle: PromptStyle;
-  /** SDXL AnimateDiff module (mm_sdxl_v10_beta or HotshotXL). */
-  motionModule: string;
-  /** Output size for image/video; snapped to the nearest SDXL bucket. Remix derives it from the source. */
+  /** Output size for image/video; snapped to the nearest SDXL (stills) or Wan (video) bucket. Remix derives it from the source. */
   width: number;
   height: number;
+  /** SDXL still pass (and the upscale / refine passes that reuse them). Video sampling has fixed Wan settings. */
   steps: number;
   cfg: number;
   seed: number;
   sampler: string;
   scheduler: string;
-  /** Video: frames to generate. */
+  /** Video: Wan clip length in frames (4n+1, 16 fps). Remix motion transfer on a clip uses it as the length too. */
   frames: number;
-  /** Video: playback rate. Remix motion: rate the source is resampled to (0 = keep the source's). */
-  fps: number;
-  /** Second sampling pass on an upscaled latent ("hires fix"). 1 = off. */
-  hiresScale: number;
-  hiresDenoise: number;
+  /** Stills: pixel upscale factor (UltimateSDUpscale). 1 = off. */
+  upscale: number;
+  /** Denoise of each upscale tile's re-sampling pass: adds detail without changing the picture. */
+  upscaleDenoise: number;
   /** IP-Adapter FaceID Plus v2 strength on the reference face(s). 0 disables it. */
   identityWeight: number;
   /** Character from the library ("" = none): adds its LoRA + trigger word to the graph. */
@@ -41,21 +40,21 @@ export interface GenerationParams {
   loraStrength: number;
   /** Feed the character's starred dataset images to FaceID (when no one-off face reference is set). */
   useCharacterRefs: boolean;
-  /** Image/Video: finish by pasting the reference face on with ReActor (exact likeness); stills also get refineFace. */
+  /** Finish stills (and the first frame of videos) by pasting the reference face on with ReActor; stills also get refineFace. */
   faceSwapAfter: boolean;
 
   // ── Remix ──
   remixMode: RemixMode;
-  /** OpenPose ControlNet strength (motion transfer). */
+  /** Pose strength: OpenPose ControlNet on stills, VACE control strength on clips. */
   controlStrength: number;
-  /** Motion transfer: 1 = redraw everything from the prompt; lower keeps more of the source's colours/layout. */
+  /** Motion transfer on a still: 1 = redraw everything from the prompt; lower keeps more of the source's colours/layout. */
   denoise: number;
   /** Face swap: refine the swapped face with the character LoRA + FaceID (stills only, see workflow.ts). */
   refineFace: boolean;
   refineDenoise: number;
-  /** Remix video: frames read from the source (after resampling). 0 = the whole clip, up to MAX_FRAMES. */
+  /** Face-swap video: frames read from the source. 0 = the whole clip, up to FACESWAP_MAX_FRAMES. */
   remixFrameCap: number;
-  /** Source dimensions as measured by the browser; used to pick the SDXL bucket. */
+  /** Source dimensions as measured by the browser; used to pick the output bucket. */
   sourceWidth: number;
   sourceHeight: number;
 }
@@ -87,7 +86,6 @@ export const DEFAULT_PARAMS: GenerationParams = {
   negativePrompt: "blurry, lowres, deformed face, bad anatomy, extra fingers, watermark, text, jpeg artifacts",
   checkpoint: "",
   promptStyle: "none",
-  motionModule: "",
   width: 832,
   height: 1216,
   steps: 30,
@@ -95,10 +93,9 @@ export const DEFAULT_PARAMS: GenerationParams = {
   seed: -1,
   sampler: "dpmpp_2m",
   scheduler: "karras",
-  frames: 48,
-  fps: 12,
-  hiresScale: 1.5,
-  hiresDenoise: 0.45,
+  frames: WAN_LENGTH.default,
+  upscale: UPSCALE.defaultFactor,
+  upscaleDenoise: UPSCALE.defaultDenoise,
   identityWeight: 0.8,
   characterId: "",
   loraStrength: 0.8,

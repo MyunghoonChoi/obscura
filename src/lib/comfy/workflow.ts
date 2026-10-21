@@ -1,36 +1,47 @@
-import { fitResolution, MAX_FRAMES, motionContextLength, PROMPT_STYLES, type PromptStyle } from "./presets";
+import {
+  FACESWAP_MAX_FRAMES,
+  fitResolution,
+  fitWanResolution,
+  PROMPT_STYLES,
+  snapWanLength,
+  WAN_FPS,
+  WAN_NEGATIVE,
+  WAN_SAMPLING,
+  type PromptStyle,
+} from "./presets";
 import type { ComfyFileRef, GenerationParams } from "./types";
 
 /**
- * Builds a ComfyUI *API-format* workflow graph from dashboard params. SDXL / Pony only, sized for
- * 24–48 GB cloud GPUs: no tiling, no low-VRAM fallbacks, full frame batches and a hires-fix pass.
+ * Builds a ComfyUI *API-format* workflow graph from dashboard params. Sized for 48–80 GB cloud GPUs.
  *
  * API format = { [nodeId]: { class_type, inputs } }, where a link to another
  * node's output is written as [sourceNodeId, outputIndex].
  *
- * Custom node packs (setup_cloud.sh installs all of them):
+ * Custom node packs (setup_cloud.sh installs all of them); everything else is ComfyUI core:
  *   ComfyUI_IPAdapter_plus        IPAdapterUnifiedLoaderFaceID, IPAdapterFaceID   (needs insightface)
- *   ComfyUI-AnimateDiff-Evolved   ADE_AnimateDiffLoaderGen1, ADE_StandardUniformContextOptions
  *   ComfyUI-VideoHelperSuite      VHS_LoadVideo, VHS_VideoInfo, VHS_VideoCombine
  *   comfyui_controlnet_aux        DWPreprocessor
- *   ComfyUI-ReActor               ReActorFaceSwap
+ *   ComfyUI-ReActor               ReActorFaceSwap, ReActorFaceBoost
  *   ComfyUI-Impact-Pack/Subpack   FaceDetailer, UltralyticsDetectorProvider
+ *   ComfyUI_UltimateSDUpscale     UltimateSDUpscale
  *
- * Three graphs share the same building blocks:
+ * Every picture of the character starts as an SDXL still, so the character LoRA + FaceID decide
+ * what the person looks like; video models then only supply motion:
  *
- *   generate (image/video)
- *     Checkpoint ─► [LoRA] ─► [clip skip] ─► CLIPTextEncodeSDXL(+/−)
- *         └ model ─► [FaceID(refs)] ─► [AnimateDiff] ─► KSampler ─► [LatentUpscale ─► KSampler] ─► VAEDecode ─► Save
+ *   still            Checkpoint ─► [LoRA] ─► [clip skip] ─► CLIPTextEncodeSDXL(+/−)
+ *                        └ model ─► [FaceID(refs)] ─► KSampler ─► VAEDecode ─► [ReActor swap ─► FaceDetailer]
+ *                                   ─► [4x-UltraSharp ─► UltimateSDUpscale (+ tile ControlNet)] ─► Save
  *
- *   remix · motion transfer (Genjutsu "Motion Transfer")
- *     Source ─► ImageScale(bucket) ─► DWPose ─► ControlNet OpenPose XL ─┐ (conditioning)
- *     same model chain as above; latent = empty (redraw) or VAE-encoded source (denoise < 1); keeps source fps + audio
+ *   video (Video tab)    still (as above, no upscale) ─► Wan 2.1 I2V 14B ─► VAEDecode ─► MP4 @16 fps
  *
- *   remix · face swap (Genjutsu "Object Swap" on the face)
- *     Source ─► ReActorFaceSwap(character face) ─► [FaceDetailer(LoRA + FaceID), stills only] ─► Save
- *     ReActor swaps each frame with one fixed identity embedding and no sampling noise, so the face is
- *     stable across frames. FaceDetailer re-samples every frame independently, which would bring back
- *     flicker, so video skips it.
+ *   remix · motion transfer
+ *     photo            source ─► DWPose ─► OpenPose ControlNet XL ─► still pipeline (pose-locked) ─► upscale ─► Save
+ *     clip             source @16 fps ─► DWPose (whole clip) ─► Wan 2.1 VACE 14B (control_video = pose,
+ *                      reference_image = a pose-locked still of the character from frame 1) ─► MP4
+ *
+ *   remix · face swap  source ─► ReActor (HyperSwap 256; FaceBoost on clips, FaceDetailer on stills) ─► Save
+ *                      ReActor applies one fixed identity embedding per frame with no sampling noise,
+ *                      which is why it stays stable across frames where per-frame re-sampling flickers.
  */
 
 type Link = [string, number];
@@ -42,7 +53,7 @@ export interface BuiltWorkflow {
   /** nodeId → human label, so the UI can say "Sampling…" instead of "40". */
   labels: Record<string, string>;
   seed: number;
-  /** Size of the first sampling pass (before hires fix); 0 when the source size is kept (face swap). */
+  /** Output size before any still upscale; 0 when the source size is kept (face swap). */
   width: number;
   height: number;
 }
@@ -56,16 +67,28 @@ export interface CharacterBinding {
   loraStrength: number;
 }
 
-/** Model files the Remix graphs need, resolved by the server from what this ComfyUI has installed. */
-export interface RemixModels {
+/** Model files the graphs need, resolved by the server from what this ComfyUI has installed. */
+export interface PipelineModels {
   /** OpenPose ControlNet for SDXL (xinsir/controlnet-openpose-sdxl-1.0). */
   controlNet?: string;
+  /** Tile ControlNet for SDXL (xinsir/controlnet-tile-sdxl-1.0); keeps upscale tiles faithful. Optional. */
+  tileControlNet?: string;
   /** ReActor swapper, best available: hyperswap_1b_256 > reswapper_256 > inswapper_128. */
   swapModel?: string;
   /** ReActor face restorer ("none" to skip). */
   faceRestore?: string;
   /** Impact Subpack bbox model for FaceDetailer, e.g. "bbox/face_yolov8m.pt". */
   faceDetector?: string;
+  /** ESRGAN-family upscaler in models/upscale_models (4x-UltraSharp.pth). */
+  upscaler?: string;
+  /** UltimateSDUpscale node pack installed. */
+  usdu: boolean;
+  /** Wan 2.1 files: diffusion models, umt5-xxl text encoder, VAE, CLIP-ViT-H vision. */
+  wanI2V?: string;
+  wanVace?: string;
+  wanTextEncoder?: string;
+  wanVae?: string;
+  wanClipVision?: string;
 }
 
 export interface RemixSource {
@@ -79,7 +102,7 @@ export interface BuildInput {
   character?: CharacterBinding;
   /** Required for remix mode. */
   source?: RemixSource;
-  models?: RemixModels;
+  models: PipelineModels;
 }
 
 class Graph {
@@ -132,7 +155,7 @@ const joinParts = (...parts: string[]) =>
     .filter(Boolean)
     .join(", ");
 
-// ── Building blocks ─────────────────────────────────────────────────────────
+// ── SDXL building blocks ────────────────────────────────────────────────────
 
 interface Conditioned {
   model: Link;
@@ -149,7 +172,7 @@ function base(g: Graph, p: GenerationParams, size: { width: number; height: numb
   let clip: Link = ["1", 1];
   const vae: Link = ["1", 2];
 
-  // The LoRA patches both UNet and text encoder, so it goes before FaceID and AnimateDiff.
+  // The LoRA patches both UNet and text encoder, so it goes before FaceID.
   if (character?.loraName && character.loraStrength > 0) {
     g.add(
       "5",
@@ -217,67 +240,85 @@ function faceId(g: Graph, model: Link, faces: ComfyFileRef[], weight: number): L
   );
 }
 
-/** AnimateDiff over sliding windows; half-window overlap keeps long clips seamless (compute is cheap on cloud GPUs). */
-function animate(g: Graph, model: Link, motionModule: string): Link {
-  const contextLength = motionContextLength(motionModule);
+/** One SDXL sampling pass and decode. */
+function sampleStill(g: Graph, p: GenerationParams, c: Pick<Conditioned, "model" | "vae" | "positive" | "negative">, latent: Link, seed: number, denoise: number): Link {
   g.add(
-    "20",
-    "ADE_StandardUniformContextOptions",
+    "40",
+    "KSampler",
     {
-      context_length: contextLength,
-      context_stride: 1,
-      context_overlap: Math.round(contextLength / 2),
-      fuse_method: "pyramid",
-      use_on_equal_length: false,
-      start_percent: 0.0,
-      guarantee_steps: 1,
+      seed,
+      steps: p.steps,
+      cfg: p.cfg,
+      sampler_name: p.sampler,
+      scheduler: p.scheduler,
+      denoise,
+      model: c.model,
+      positive: c.positive,
+      negative: c.negative,
+      latent_image: latent,
     },
-    "Configuring motion context",
+    "Sampling",
   );
-  return g.add(
-    "21",
-    "ADE_AnimateDiffLoaderGen1",
-    { model, model_name: motionModule, beta_schedule: "autoselect", context_options: ["20", 0] },
-    "Loading motion module",
-  );
+  return g.add("41", "VAEDecode", { samples: ["40", 0], vae: c.vae }, "Decoding");
 }
 
-/** First pass, then an optional hires-fix pass on a latent upscaled by p.hiresScale, then decode. */
-function sampleAndDecode(
-  g: Graph,
-  p: GenerationParams,
-  c: Pick<Conditioned, "model" | "vae" | "positive" | "negative">,
-  latent: Link,
-  seed: number,
-  denoise: number,
-): Link {
-  const sampler = (id: string, latentImage: Link, d: number, title: string) =>
+/**
+ * True pixel upscale: 4x-UltraSharp enlarges the decoded image, then UltimateSDUpscale re-samples it
+ * in 1024 px tiles at a low denoise with the character model, so detail is resolved rather than
+ * invented. A tile ControlNet, when installed, keeps each tile faithful to its input.
+ */
+function upscaleStill(g: Graph, p: GenerationParams, images: Link, c: Conditioned, model: Link, models: PipelineModels, seed: number): Link {
+  if (p.upscale <= 1 || !models.usdu || !models.upscaler) return images;
+  g.add("44", "UpscaleModelLoader", { model_name: models.upscaler }, "Loading upscaler");
+  let positive = c.positive;
+  let negative = c.negative;
+  if (models.tileControlNet) {
+    g.add("45", "ControlNetLoader", { control_net_name: models.tileControlNet }, "Loading tile ControlNet");
     g.add(
-      id,
-      "KSampler",
-      {
-        seed,
-        steps: p.steps,
-        cfg: p.cfg,
-        sampler_name: p.sampler,
-        scheduler: p.scheduler,
-        denoise: d,
-        model: c.model,
-        positive: c.positive,
-        negative: c.negative,
-        latent_image: latentImage,
-      },
-      title,
+      "46",
+      "ControlNetApplyAdvanced",
+      { positive, negative, control_net: ["45", 0], image: images, strength: 0.5, start_percent: 0.0, end_percent: 1.0, vae: c.vae },
+      "Applying tile guidance",
     );
-  let samples = sampler("40", latent, denoise, "Sampling");
-  if (p.hiresScale > 1) {
-    g.add("42", "LatentUpscaleBy", { samples, upscale_method: "bislerp", scale_by: p.hiresScale }, "Upscaling latent");
-    samples = sampler("43", ["42", 0], p.hiresDenoise, "Hires fix");
+    positive = ["46", 0];
+    negative = ["46", 1];
   }
-  return g.add("41", "VAEDecode", { samples, vae: c.vae }, "Decoding frames");
+  return g.add(
+    "47",
+    "UltimateSDUpscale",
+    {
+      image: images,
+      model,
+      positive,
+      negative,
+      vae: c.vae,
+      upscale_by: p.upscale,
+      seed,
+      steps: p.steps,
+      cfg: p.cfg,
+      sampler_name: p.sampler,
+      scheduler: p.scheduler,
+      denoise: p.upscaleDenoise,
+      upscale_model: ["44", 0],
+      mode_type: "Linear",
+      tile_width: 1024,
+      tile_height: 1024,
+      mask_blur: 8,
+      tile_padding: 32,
+      seam_fix_mode: "Half Tile",
+      seam_fix_denoise: 0.35,
+      seam_fix_width: 64,
+      seam_fix_mask_blur: 8,
+      seam_fix_padding: 16,
+      force_uniform_tiles: true,
+      tiled_decode: false,
+      batch_size: 1,
+    },
+    `Upscaling ${p.upscale}×`,
+  );
 }
 
-/** Saves stills, or encodes an H.264 MP4 (optionally at the source's fps with its audio track). */
+/** Saves stills, or encodes an H.264 MP4 (optionally with the source's audio track). */
 function save(g: Graph, images: Link, video: false | { fps: number | Link; audio?: Link }) {
   if (!video) {
     g.add("50", "SaveImage", { images, filename_prefix: "obscura/img" }, "Saving image");
@@ -308,7 +349,7 @@ function save(g: Graph, images: Link, video: false | { fps: number | Link; audio
  * `maxSide` scales video frames down (aspect kept) when the source is larger; VHS holds every frame
  * in RAM as float32, so this is what keeps a 4K face swap from exhausting the box.
  */
-function loadSource(g: Graph, p: GenerationParams, source: RemixSource, forceRate: number, maxSide = 0) {
+function loadSource(g: Graph, p: GenerationParams, source: RemixSource, forceRate: number, frameCap: number, maxSide = 0, withInfo = true) {
   if (source.kind === "image") {
     return { frames: g.add("70", "LoadImage", { image: refPath(source.file) }, "Loading source image") };
   }
@@ -322,22 +363,36 @@ function loadSource(g: Graph, p: GenerationParams, source: RemixSource, forceRat
       // With only one dimension set, VHS keeps the aspect ratio.
       custom_width: shrink && p.sourceWidth >= p.sourceHeight ? maxSide : 0,
       custom_height: shrink && p.sourceWidth < p.sourceHeight ? maxSide : 0,
-      frame_load_cap: p.remixFrameCap || MAX_FRAMES[p.remixMode],
+      frame_load_cap: frameCap,
       skip_first_frames: 0,
       select_every_nth: 1,
     },
     "Loading source video",
   );
-  g.add("72", "VHS_VideoInfo", { video_info: ["70", 3] }, "Reading source video");
-  return { frames, frameCount: ["70", 1] as Link, audio: ["70", 2] as Link, fps: ["72", 5] as Link };
+  // Only face swap keeps the source's own frame rate; Wan outputs run at WAN_FPS and don't need the info node.
+  const fps = withInfo ? (g.add("72", "VHS_VideoInfo", { video_info: ["70", 3] }, "Reading source video"), ["72", 5] as Link) : undefined;
+  return { frames, frameCount: ["70", 1] as Link, audio: ["70", 2] as Link, fps };
 }
 
-const refPath = (r: ComfyFileRef) => (r.subfolder ? `${r.subfolder}/${r.filename}` : r.filename);
-const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
-/** The swappers work on 128–256 px face crops, so a 4K source only costs RAM. Stills keep full size. */
-const FACESWAP_MAX_SIDE = 1920;
-
-// ── Graphs ──────────────────────────────────────────────────────────────────
+/** DWPose skeleton frames (body + hands + face) drawn for xinsir's OpenPose XL / Wan VACE. */
+function dwpose(g: Graph, id: string, image: Link, size: { width: number; height: number }, title: string): Link {
+  return g.add(
+    id,
+    "DWPreprocessor",
+    {
+      image,
+      detect_hand: "enable",
+      detect_body: "enable",
+      detect_face: "enable",
+      resolution: Math.floor(Math.min(size.width, size.height) / 64) * 64,
+      bbox_detector: "yolox_l.torchscript.pt",
+      pose_estimator: "dw-ll_ucoco_384_bs5.torchscript.pt",
+      // xinsir's OpenPose XL was trained on thicker skeleton strokes.
+      scale_stick_for_xinsr_cn: "enable",
+    },
+    title,
+  );
+}
 
 /** The reference face as a LoadImage node (shared by FaceID and the swap; both use id "10"). */
 function faceNode(g: Graph, face: ComfyFileRef): Link {
@@ -345,9 +400,10 @@ function faceNode(g: Graph, face: ComfyFileRef): Link {
 }
 
 /**
- * ReActor pastes the first reference face onto every frame of `images` (one fixed identity embedding,
- * no sampling noise, so it is stable across frames), then CodeFormer restores it. With `refine` set
- * (stills only), FaceDetailer re-samples the face region with the LoRA + FaceID model for detail.
+ * ReActor pastes the first reference face onto every frame of `images`. Stills: CodeFormer restore on
+ * paste, then (with `refine`) FaceDetailer re-samples the face region with the LoRA + FaceID model.
+ * Clips: FaceBoost restores and upsamples the face crop *before* pasting (sharper than a 256 px
+ * paste) and no per-frame re-sampling, so the face doesn't flicker.
  */
 function swapFace(
   g: Graph,
@@ -355,10 +411,26 @@ function swapFace(
   input: BuildInput,
   images: Link,
   seed: number,
-  refine?: { c: Conditioned; model: Link },
+  mode: { refine?: { c: Conditioned; model: Link } } | { boost: true },
 ): Link {
-  const models = input.models!;
+  const models = input.models;
   const face = faceNode(g, input.faces![0]);
+  const boost = "boost" in mode;
+  if (boost) {
+    g.add(
+      "83",
+      "ReActorFaceBoost",
+      {
+        enabled: true,
+        boost_model: models.faceRestore ?? "none",
+        interpolation: "Lanczos",
+        visibility: 1,
+        codeformer_weight: 0.5,
+        restore_with_main_after: false,
+      },
+      "Preparing face boost",
+    );
+  }
   let out = g.add(
     "80",
     "ReActorFaceSwap",
@@ -367,7 +439,7 @@ function swapFace(
       input_image: images,
       swap_model: models.swapModel,
       facedetection: "retinaface_resnet50",
-      face_restore_model: models.faceRestore ?? "none",
+      face_restore_model: boost ? "none" : (models.faceRestore ?? "none"),
       face_restore_visibility: 1,
       codeformer_weight: 0.5,
       detect_gender_input: "no",
@@ -376,9 +448,11 @@ function swapFace(
       source_faces_index: "0",
       console_log_level: 1,
       source_image: face,
+      ...(boost && { face_boost: ["83", 0] }),
     },
     "Swapping face",
   );
+  const refine = "refine" in mode ? mode.refine : undefined;
   if (refine && models.faceDetector) {
     g.add("81", "UltralyticsDetectorProvider", { model_name: models.faceDetector }, "Loading face detector");
     out = g.add(
@@ -423,132 +497,231 @@ function swapFace(
   return out;
 }
 
-/**
- * Text → image/video with the character's LoRA + FaceID identity. With faceSwapAfter (and a swap model
- * installed) the render is finished by pasting the reference face on, which pins the likeness
- * regardless of how well the LoRA learned it.
- */
-function buildGenerate(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
-  const isVideo = p.mode === "video";
+/** Still → [swap + refine]; the identity model (LoRA + FaceID, no video wrapping) drives the refine. */
+function finishStill(g: Graph, p: GenerationParams, input: BuildInput, images: Link, c: Conditioned, identity: Link, seed: number): Link {
+  if (!p.faceSwapAfter || !input.faces?.length || !input.models.swapModel) return images;
+  return swapFace(g, p, input, images, seed, { refine: p.refineFace ? { c, model: identity } : undefined });
+}
+
+// ── Wan 2.1 building blocks ─────────────────────────────────────────────────
+
+interface WanConditioning {
+  model: Link;
+  vae: Link;
+  positive: Link;
+  negative: Link;
+}
+
+/** umt5-xxl text encoding + VAE + the diffusion model with Wan's shift. The character trigger means nothing to Wan, so only the user's text goes in. */
+function wanBase(g: Graph, p: GenerationParams, diffusionModel: string, models: PipelineModels): WanConditioning {
+  g.add("90", "UNETLoader", { unet_name: diffusionModel, weight_dtype: "default" }, "Loading Wan 2.1");
+  const model = g.add("98", "ModelSamplingSD3", { model: ["90", 0], shift: WAN_SAMPLING.shift }, "Setting Wan shift");
+  g.add("91", "CLIPLoader", { clip_name: models.wanTextEncoder, type: "wan", device: "default" }, "Loading umt5-xxl");
+  const positive = g.add("92", "CLIPTextEncode", { text: clean(p.prompt), clip: ["91", 0] }, "Encoding motion prompt");
+  const negative = g.add("93", "CLIPTextEncode", { text: WAN_NEGATIVE, clip: ["91", 0] }, "Encoding Wan negative");
+  const vae = g.add("96", "VAELoader", { vae_name: models.wanVae }, "Loading Wan VAE");
+  return { model, vae, positive, negative };
+}
+
+function wanSample(g: Graph, w: WanConditioning, latent: Link, seed: number): Link {
+  return g.add(
+    "99",
+    "KSampler",
+    {
+      seed,
+      steps: WAN_SAMPLING.steps,
+      cfg: WAN_SAMPLING.cfg,
+      sampler_name: WAN_SAMPLING.sampler,
+      scheduler: WAN_SAMPLING.scheduler,
+      denoise: 1,
+      model: w.model,
+      positive: w.positive,
+      negative: w.negative,
+      latent_image: latent,
+    },
+    "Sampling video (Wan 2.1)",
+  );
+}
+
+/** Image-to-video: the still becomes frame 1 and its CLIP-Vision embedding steers the rest. */
+function wanImageToVideo(g: Graph, p: GenerationParams, still: Link, size: { width: number; height: number }, length: number, seed: number, models: PipelineModels): Link {
+  const w = wanBase(g, p, models.wanI2V!, models);
+  g.add("94", "CLIPVisionLoader", { clip_name: models.wanClipVision }, "Loading CLIP Vision");
+  g.add("95", "CLIPVisionEncode", { clip_vision: ["94", 0], image: still, crop: "none" }, "Encoding first frame");
+  g.add(
+    "97",
+    "WanImageToVideo",
+    {
+      positive: w.positive,
+      negative: w.negative,
+      vae: w.vae,
+      width: size.width,
+      height: size.height,
+      length,
+      batch_size: 1,
+      clip_vision_output: ["95", 0],
+      start_image: still,
+    },
+    "Preparing image-to-video",
+  );
+  const samples = wanSample(g, { ...w, positive: ["97", 0], negative: ["97", 1] }, ["97", 2], seed);
+  return g.add("100", "VAEDecode", { samples, vae: w.vae }, "Decoding video");
+}
+
+/** VACE: the pose clip drives the motion, the reference still supplies the character and look. */
+function wanVace(g: Graph, p: GenerationParams, controlVideo: Link, reference: Link, size: { width: number; height: number }, length: number, seed: number, models: PipelineModels): Link {
+  const w = wanBase(g, p, models.wanVace!, models);
+  g.add(
+    "97",
+    "WanVaceToVideo",
+    {
+      positive: w.positive,
+      negative: w.negative,
+      vae: w.vae,
+      width: size.width,
+      height: size.height,
+      length,
+      batch_size: 1,
+      strength: p.controlStrength,
+      control_video: controlVideo,
+      reference_image: reference,
+    },
+    "Preparing motion transfer (VACE)",
+  );
+  const samples = wanSample(g, { ...w, positive: ["97", 0], negative: ["97", 1] }, ["97", 2], seed);
+  // VACE prepends the reference frame to the latent; trim_latent says how much to drop.
+  g.add("101", "TrimVideoLatent", { samples, trim_amount: ["97", 3] }, "Trimming reference frame");
+  return g.add("100", "VAEDecode", { samples: ["101", 0], vae: w.vae }, "Decoding video");
+}
+
+const refPath = (r: ComfyFileRef) => (r.subfolder ? `${r.subfolder}/${r.filename}` : r.filename);
+const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
+/** The swappers work on 128–256 px face crops, so a 4K source only costs RAM. Stills keep full size. */
+const FACESWAP_MAX_SIDE = 1920;
+
+// ── Graphs ──────────────────────────────────────────────────────────────────
+
+/** Text → still: LoRA + FaceID, face-swap finish, pixel upscale. */
+function buildImage(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const size = fitResolution(p.width, p.height);
   const c = base(g, p, size, input.character);
   const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-  const model = isVideo ? animate(g, identity, p.motionModule) : identity;
-
-  const latent = g.add(
-    "30",
-    "EmptyLatentImage",
-    { width: size.width, height: size.height, batch_size: isVideo ? p.frames : 1 },
-    "Preparing latent",
-  );
-  let images = sampleAndDecode(g, p, { ...c, model }, latent, seed, 1);
-  if (p.faceSwapAfter && input.faces?.length && input.models?.swapModel) {
-    // Refine re-samples each frame independently, which would flicker, so it stays off for video.
-    images = swapFace(g, p, input, images, seed, !isVideo && p.refineFace ? { c, model: identity } : undefined);
-  }
-  save(g, images, isVideo && { fps: p.fps });
+  const latent = g.add("30", "EmptyLatentImage", { width: size.width, height: size.height, batch_size: 1 }, "Preparing latent");
+  let images = sampleStill(g, p, { ...c, model: identity }, latent, seed, 1);
+  images = finishStill(g, p, input, images, c, identity, seed);
+  images = upscaleStill(g, p, images, c, identity, input.models, seed);
+  save(g, images, false);
   return size;
 }
 
-/** Source pose (DWPose → ControlNet OpenPose XL) + character LoRA/FaceID + prompt for outfit and background. */
+/** Text → clip: a finished SDXL still of the character becomes frame 1 of a Wan 2.1 I2V generation. */
+function buildVideo(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
+  const wanSize = fitWanResolution(p.width, p.height);
+  const stillSize = fitResolution(wanSize.width, wanSize.height);
+  const c = base(g, p, stillSize, input.character);
+  const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
+  const latent = g.add("30", "EmptyLatentImage", { width: stillSize.width, height: stillSize.height, batch_size: 1 }, "Preparing latent");
+  let still = sampleStill(g, p, { ...c, model: identity }, latent, seed, 1);
+  still = finishStill(g, p, input, still, c, identity, seed);
+  const frames = wanImageToVideo(g, p, still, wanSize, snapWanLength(p.frames), seed, input.models);
+  save(g, frames, { fps: WAN_FPS });
+  return wanSize;
+}
+
+/** Source pose → the character: ControlNet on stills, Wan VACE on clips (both seeded by a pose-locked still). */
 function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const source = input.source!;
-  const isVideo = source.kind === "video";
-  const size = fitResolution(p.sourceWidth, p.sourceHeight);
-  const src = loadSource(g, p, source, p.fps);
+  const models = input.models;
 
-  const scaled = g.add(
-    "71",
-    "ImageScale",
-    { image: src.frames, upscale_method: "lanczos", width: size.width, height: size.height, crop: "center" },
-    "Fitting source to SDXL size",
-  );
-  const pose = g.add(
-    "73",
-    "DWPreprocessor",
-    {
-      image: scaled,
-      detect_hand: "enable",
-      detect_body: "enable",
-      detect_face: "enable",
-      resolution: Math.floor(Math.min(size.width, size.height) / 64) * 64,
-      bbox_detector: "yolox_l.torchscript.pt",
-      pose_estimator: "dw-ll_ucoco_384_bs5.torchscript.pt",
-      // xinsir's OpenPose XL was trained on thicker skeleton strokes.
-      scale_stick_for_xinsr_cn: "enable",
-    },
-    "Extracting pose",
-  );
+  if (source.kind === "image") {
+    const size = fitResolution(p.sourceWidth, p.sourceHeight);
+    const src = loadSource(g, p, source, 0, 0);
+    const scaled = g.add("71", "ImageScale", { image: src.frames, upscale_method: "lanczos", width: size.width, height: size.height, crop: "center" }, "Fitting source to SDXL size");
+    const pose = dwpose(g, "73", scaled, size, "Extracting pose");
+    const c = base(g, p, size, input.character);
+    g.add("60", "ControlNetLoader", { control_net_name: models.controlNet }, "Loading OpenPose ControlNet");
+    g.add(
+      "61",
+      "ControlNetApplyAdvanced",
+      { positive: c.positive, negative: c.negative, control_net: ["60", 0], image: pose, strength: p.controlStrength, start_percent: 0.0, end_percent: 1.0, vae: c.vae },
+      "Applying pose",
+    );
+    const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
+    // denoise 1 redraws everything from the prompt; lower starts from the source to keep its look.
+    const latent =
+      p.denoise < 1
+        ? g.add("31", "VAEEncode", { pixels: scaled, vae: c.vae }, "Encoding source")
+        : g.add("30", "EmptyLatentImage", { width: size.width, height: size.height, batch_size: 1 }, "Preparing latent");
+    let images = sampleStill(g, p, { model: identity, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, p.denoise);
+    images = finishStill(g, p, input, images, c, identity, seed);
+    images = upscaleStill(g, p, images, c, identity, models, seed);
+    save(g, images, false);
+    return size;
+  }
 
-  const c = base(g, p, size, input.character);
-  g.add("60", "ControlNetLoader", { control_net_name: input.models!.controlNet }, "Loading OpenPose ControlNet");
+  // Clip: Wan runs at 16 fps, so the source is resampled to it and capped at Wan's max length.
+  const length = snapWanLength(p.frames);
+  const wanSize = fitWanResolution(p.sourceWidth, p.sourceHeight);
+  const stillSize = fitResolution(wanSize.width, wanSize.height);
+  const src = loadSource(g, p, source, WAN_FPS, length, 0, false);
+  const scaled = g.add("71", "ImageScale", { image: src.frames, upscale_method: "lanczos", width: wanSize.width, height: wanSize.height, crop: "center" }, "Fitting source to Wan size");
+  const poseClip = dwpose(g, "73", scaled, wanSize, "Extracting pose (whole clip)");
+
+  // Reference still: the character in frame 1's pose, so VACE has the right person and outfit to carry.
+  const first = g.add("74", "ImageFromBatch", { image: scaled, batch_index: 0, length: 1 }, "Taking first frame");
+  const firstPose = dwpose(g, "75", first, stillSize, "Extracting pose (first frame)");
+  const c = base(g, p, stillSize, input.character);
+  g.add("60", "ControlNetLoader", { control_net_name: models.controlNet }, "Loading OpenPose ControlNet");
   g.add(
     "61",
     "ControlNetApplyAdvanced",
-    {
-      positive: c.positive,
-      negative: c.negative,
-      control_net: ["60", 0],
-      image: pose,
-      strength: p.controlStrength,
-      start_percent: 0.0,
-      end_percent: 1.0,
-      vae: c.vae,
-    },
+    { positive: c.positive, negative: c.negative, control_net: ["60", 0], image: firstPose, strength: p.controlStrength, start_percent: 0.0, end_percent: 1.0, vae: c.vae },
     "Applying pose",
   );
-
   const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-  const model = isVideo ? animate(g, identity, p.motionModule) : identity;
+  const latent = g.add("30", "EmptyLatentImage", { width: stillSize.width, height: stillSize.height, batch_size: 1 }, "Preparing latent");
+  let still = sampleStill(g, p, { model: identity, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, 1);
+  still = finishStill(g, p, input, still, c, identity, seed);
 
-  // denoise 1 redraws everything from the prompt; lower starts from the source frames to keep their look.
-  const latent =
-    p.denoise < 1
-      ? g.add("31", "VAEEncode", { pixels: scaled, vae: c.vae }, "Encoding source")
-      : g.add(
-          "30",
-          "EmptyLatentImage",
-          { width: size.width, height: size.height, batch_size: src.frameCount ?? 1 },
-          "Preparing latent",
-        );
-
-  let images = sampleAndDecode(g, p, { model, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, p.denoise);
-  if (p.faceSwapAfter && input.faces?.length && input.models!.swapModel) {
-    // The refine uses the plain prompt conditioning: the pose ControlNet hint belongs to the whole frame, not a face crop.
-    images = swapFace(g, p, input, images, seed, !isVideo && p.refineFace ? { c, model: identity } : undefined);
-  }
-  save(g, images, isVideo && { fps: src.fps!, audio: src.audio });
-  return size;
+  const frames = wanVace(g, p, poseClip, still, wanSize, length, seed, models);
+  save(g, frames, { fps: WAN_FPS });
+  return wanSize;
 }
 
-/** Swaps the character's face into the source at its own resolution; optionally refines stills with LoRA + FaceID. */
+/** Swaps the character's face into the source at its own resolution. */
 function buildFaceSwap(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const source = input.source!;
   const isVideo = source.kind === "video";
   // Face swap keeps every source frame as filmed; fps 0 = no resampling.
-  const src = loadSource(g, p, source, 0, FACESWAP_MAX_SIDE);
+  const src = loadSource(g, p, source, 0, p.remixFrameCap || FACESWAP_MAX_FRAMES, FACESWAP_MAX_SIDE);
 
-  let refine: { c: Conditioned; model: Link } | undefined;
-  if (!isVideo && p.refineFace && input.models!.faceDetector) {
-    const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
-    const c = base(g, p, size, input.character);
-    refine = { c, model: faceId(g, c.model, input.faces ?? [], p.identityWeight) };
+  let images: Link;
+  if (isVideo) {
+    images = swapFace(g, p, input, src.frames, seed, { boost: true });
+  } else {
+    let refine: { c: Conditioned; model: Link } | undefined;
+    if (p.refineFace && input.models.faceDetector) {
+      const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
+      const c = base(g, p, size, input.character);
+      refine = { c, model: faceId(g, c.model, input.faces ?? [], p.identityWeight) };
+    }
+    images = swapFace(g, p, input, src.frames, seed, { refine });
   }
-  const images = swapFace(g, p, input, src.frames, seed, refine);
   save(g, images, isVideo && { fps: src.fps!, audio: src.audio });
   return { width: 0, height: 0 };
 }
 
 /**
- * Assembles the graph for params.mode. Compatibility (SDXL checkpoint, SDXL motion module, SDXL LoRA,
- * installed Remix models) is checked by /api/generate before this is called, so this stays pure.
+ * Assembles the graph for params.mode. Compatibility (SDXL checkpoint, installed Wan / swap /
+ * upscale models) is checked by /api/generate before this is called, so this stays pure.
  */
-export function buildWorkflow(p: GenerationParams, input: BuildInput = {}): BuiltWorkflow {
+export function buildWorkflow(p: GenerationParams, input: BuildInput): BuiltWorkflow {
   const g = new Graph();
   const seed = p.seed >= 0 ? p.seed : randomSeed();
   let size: { width: number; height: number };
-  if (p.mode !== "remix") size = buildGenerate(g, p, input, seed);
-  else if (!input.source || !input.models) throw new Error("Remix needs a source and its models.");
+  if (p.mode === "image") size = buildImage(g, p, input, seed);
+  else if (p.mode === "video") size = buildVideo(g, p, input, seed);
+  else if (!input.source) throw new Error("Remix needs a source.");
   else if (p.remixMode === "faceswap") size = buildFaceSwap(g, p, input, seed);
   else size = buildMotionTransfer(g, p, input, seed);
   return { workflow: g.workflow, labels: g.labels, seed, ...size };

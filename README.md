@@ -1,13 +1,14 @@
 # Obscura
 
-A private, self-hosted image and video studio that drives **your own ComfyUI** on a cloud GPU (24–48 GB+, e.g. RTX 4090 / A6000 / A100 on RunPod). It is built around **SDXL / Pony V6 XL** and **trained characters**: each character gets its own LoRA, and Remix puts that character into existing footage Genjutsu-style. It uses no third-party AI APIs and applies no content filters of its own.
+A private, self-hosted image and video studio that drives **your own ComfyUI** on a cloud GPU (48–80 GB, e.g. RTX 6000 Ada / H100 on RunPod). It is built around **trained characters**: each character gets an SDXL LoRA, every picture of them starts as an SDXL still, and the video models only add motion, so the character looks the same everywhere. It uses no third-party AI APIs and applies no content filters of its own.
 
-- **Image / Video**: prompt → SDXL with the character's LoRA, IP-Adapter **FaceID Plus v2** and a hires-fix pass; video through SDXL AnimateDiff
-- **Remix**: drop a clip or photo, then
-  - **Motion transfer**: keep the source's movement (DWPose → OpenPose ControlNet XL) and redraw it as your character, with outfit and background from the prompt
-  - **Face swap**: keep the source as filmed and swap in your character's face (ReActor), optionally refined with the LoRA (stills)
-- **Character library**: a dataset per character, one-click **SDXL LoRA training** (kohya), versioned LoRAs, and *Add to dataset* on good results
-- **Live latent previews**, step progress, source fps + audio kept on Remix clips, history, optional Basic Auth
+- **Image**: SDXL / Pony + character LoRA + IP-Adapter FaceID, face-swap finish, then a true pixel upscale (4x-UltraSharp → UltimateSDUpscale tiles with a tile ControlNet)
+- **Video**: that still becomes frame 1 of a **Wan 2.1 I2V 14B** clip at 720p / 16 fps
+- **Remix** a clip or photo:
+  - **Motion transfer**: the source's pose (DWPose) drives a pose-locked still, and for clips **Wan 2.1 VACE 14B** follows the whole movement with that still as the reference
+  - **Face swap**: keep the source as filmed and put the character's face in (ReActor HyperSwap; FaceBoost on clips, FaceDetailer refine on stills)
+- **Character library**: a dataset per character, one-click **SDXL LoRA training** (kohya), versioned LoRAs, *Add to dataset* on good results
+- Live previews, step progress, source audio kept on face-swap clips, history, optional Basic Auth, auto-deploy on push
 
 ## Stack
 
@@ -24,7 +25,7 @@ A private, self-hosted image and video studio that drives **your own ComfyUI** o
 ```
 Browser                               Next.js (Node)                                  ComfyUI (127.0.0.1:8188)
 ───────                               ──────────────                                  ────────────────────────
-POST /api/generate  (multipart) ───►  sanitize params, check SDXL/motion/LoRA/Remix models
+POST /api/generate  (multipart) ───►  sanitize params, check installed models per capability
   params · reference · source         upload face(s) + source ──────────────────►  POST /upload/image
                                       buildWorkflow() → API-format JSON graph
                                       queue             ─────────────────────────►  POST /prompt {prompt, client_id}
@@ -39,37 +40,40 @@ EventSource /api/jobs/:id/stream ──►  open WS ?clientId ◄──── pr
 
 Key files:
 
-- [`src/lib/comfy/workflow.ts`](src/lib/comfy/workflow.ts): **params → ComfyUI graph** for Image/Video, Motion transfer and Face swap. Start here to change a graph.
-- [`src/lib/comfy/presets.ts`](src/lib/comfy/presets.ts): SDXL buckets, Pony prompt style, motion-module context, frame caps.
-- [`src/lib/comfy/models.ts`](src/lib/comfy/models.ts): finds the installed ControlNet / swap / restore / detector models and reports what each Remix mode is missing.
+- [`src/lib/comfy/workflow.ts`](src/lib/comfy/workflow.ts): **params → ComfyUI graph** for Image, Video, Motion transfer and Face swap. Start here to change a graph.
+- [`src/lib/comfy/presets.ts`](src/lib/comfy/presets.ts): SDXL and Wan size buckets, Wan sampling settings, Pony prompt style, caps.
+- [`src/lib/comfy/models.ts`](src/lib/comfy/models.ts): finds the installed models for every role, the default checkpoint, and what each capability is missing.
 - [`src/app/api/generate/route.ts`](src/app/api/generate/route.ts): validation, uploads, character resolution.
 - [`src/lib/comfy/stream.ts`](src/lib/comfy/stream.ts) and [`client.ts`](src/lib/comfy/client.ts): the ComfyUI bridge (server-only).
 - [`src/lib/training/runner.ts`](src/lib/training/runner.ts): SDXL LoRA training runs.
 
 ## Graphs
 
-All three share the same building blocks (checkpoint → character LoRA → clip skip → `CLIPTextEncodeSDXL`, FaceID, AnimateDiff, KSampler + hires fix):
-
 ```
-Image / Video      Checkpoint ─► [LoRA] ─► [clip skip] ─► CLIPTextEncodeSDXL (+/−, size-conditioned)
-                       └ model ─► FaceID Plus v2 (starred faces) ─► [AnimateDiff] ─► KSampler ─► [LatentUpscaleBy ─► KSampler] ─► VAEDecode ─► Save
+still          Checkpoint ─► [LoRA] ─► [clip skip] ─► CLIPTextEncodeSDXL(+/−)
+                   └ model ─► [FaceID Plus v2 (starred faces)] ─► KSampler ─► VAEDecode
+               ─► [ReActor swap ─► FaceDetailer refine] ─► [4x-UltraSharp ─► UltimateSDUpscale (+ tile ControlNet)] ─► Save
 
-Motion transfer    Source ─► ImageScale(SDXL bucket) ─► DWPose ─► ControlNet OpenPose XL (xinsir) ─► conditioning
-                   same model chain; latent = empty (redraw from prompt) or VAE-encoded source ("New look" < 1)
-                   video: frame count, fps and audio come from VHS_LoadVideo / VHS_VideoInfo
+video          still (as above, no upscale) ─► CLIP-ViT-H ─► WanImageToVideo ─► KSampler (uni_pc/simple, 20, cfg 6, shift 8)
+               ─► VAEDecode ─► MP4 @ 16 fps
 
-Face swap          Source ─► ReActorFaceSwap(character face; hyperswap_1b_256 > inswapper_128; CodeFormer) ─► Save
-                   stills: + FaceDetailer with the LoRA + FaceID for skin detail and likeness
+motion · photo source ─► DWPose ─► OpenPose ControlNet XL ─► still pipeline (pose-locked) ─► upscale ─► Save
+motion · clip  source @16 fps ─► DWPose (whole clip) ─► WanVaceToVideo(control_video = pose, reference_image = pose-locked
+               still of the character from frame 1, strength = Pose strength) ─► KSampler ─► TrimVideoLatent ─► MP4
+
+face swap      source ─► ReActor (HyperSwap 256 > reswapper > inswapper; clips: FaceBoost restore-before-paste,
+               stills: CodeFormer + FaceDetailer refine with the LoRA) ─► Save (source fps + audio kept on clips)
 ```
 
 Design decisions:
 
-- **SDXL only.** Sizes snap to ~1 MP training buckets (832×1216, 1344×768, …); Remix picks the bucket closest to the source's aspect. `CLIPTextEncodeSDXL` gets the real output size (plain `CLIPTextEncode` would condition SDXL on 768×768). SD 1.5 checkpoints and motion modules are filtered out of the dropdowns and rejected by the API.
-- **Pony** is a prompt style, not a separate graph: `score_9, score_8_up, score_7_up` / `score_6, score_5, score_4` and clip skip −2. Picking a `*pony*` checkpoint selects it.
-- **Prompt parts stay separate** until the server joins them: `[style tags], [character trigger], [your prompt]`. Your text passes through verbatim, and the graph is serialized with `JSON.stringify`, so nothing in a prompt can break the request.
-- **Cloud-sized defaults**: no tiled decode, full frame batches, AnimateDiff windows overlap by half, hires fix 1.5× on stills (clips cap at 1.5×). Frame caps: 192 for generated video, 240 for motion transfer, 360 for face swap (~12 s at 30 fps: VHS keeps every frame in RAM, which is also why face-swap video over 1920 px is scaled down). Remix defaults to the whole clip up to the cap.
-- **Temporal stability**: face swap uses ReActor, which applies one fixed identity embedding per frame with no sampling noise, so the face doesn't flicker. FaceDetailer re-samples every frame independently, so it only runs on stills. Motion transfer gets its consistency from AnimateDiff + one FaceID embedding + the pose ControlNet.
-- **Known limits**: SDXL AnimateDiff (`mm_sdxl_v10_beta`, HotshotXL) is noticeably weaker than SD 1.5 AnimateDiff or a native video model, and motion-transfer clips can still shimmer in backgrounds and fabric. If clip quality falls short, a Wan-based video graph can be added as another builder without touching the rest. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so and points at the *Finish with a face swap* toggle), and flagged video frames are **dropped**, which shortens the clip and can desync audio.
+- **Every character picture is an SDXL still first.** Wan 2.1 is a stronger video model than anything SDXL-based, but it has no LoRA for your character; seeding it with a finished still (LoRA + FaceID + face swap) keeps the identity while Wan supplies the motion.
+- **Wan settings are the reference ones** from ComfyUI's example workflows: `uni_pc` / `simple`, 20 steps, cfg 6, shift 8, 81 frames (5 s) at 16 fps, 720p buckets, Wan's own negative prompt. Length snaps to 4n+1 (17–121).
+- **Upscaling resolves detail instead of inventing it**: 4x-UltraSharp enlarges, then UltimateSDUpscale re-samples 1024 px tiles at denoise 0.3 with the character model; the xinsir tile ControlNet (strength 0.5) keeps every tile faithful. 2× of 832×1216 ≈ 1664×2432.
+- **Pony** is a prompt style, not a separate graph: `score_9, score_8_up, score_7_up` / `score_6, score_5, score_4` and clip skip −2. The default checkpoint is Pony V6 XL when installed (`OBSCURA_DEFAULT_CHECKPOINT` overrides), never "whatever sorts first".
+- **Prompt parts stay separate** until the server joins them: `[style tags], [character trigger], [your prompt]`. Your text passes through verbatim, and the graph is serialized with `JSON.stringify`, so nothing in a prompt can break the request. Wan only receives your own text.
+- **Temporal stability of swapped faces** comes from ReActor applying one fixed identity embedding per frame with no sampling noise. FaceBoost restores and upsamples the face crop *before* pasting (sharper than a raw 256 px paste); FaceDetailer re-sampling every frame would flicker, so it runs on stills only. LivePortrait is not a swapper (it animates a portrait with a driving video) and isn't used.
+- **Known limits**: Wan 2.1 is a 2025 model, not magic: fast or complex motion can still warp hands and fabric, and VACE follows the pose, not the source's camera moves. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so and points at the *Finish with a face swap* toggle), and flagged video frames are **dropped**, which shortens the clip and can desync audio. Face-swap clips are capped at 360 frames and 1920 px (VHS keeps every frame in RAM).
 
 ## Character LoRAs
 
@@ -78,7 +82,7 @@ FaceID copies a face from photos. A **LoRA** learns the character, so angles, ex
 **The loop** (`/characters`):
 
 1. **Create** a character. It gets a made-up *trigger word* (e.g. `mina_ob`) that the LoRA binds the identity to.
-2. **Build the dataset.** Drop 15–30 varied photos (or use the 📷+ button in the studio). With only a few, star them and generate variations: until v1 exists, starred photos drive FaceID. Keep good results with **Add to dataset**; removed images move to `removed/`.
+2. **Build the dataset.** Drop 15–30 varied photos (or use the 📷+ button in the studio). With only a few, star them and generate variations: until v1 exists, starred photos drive FaceID and the face swap. Keep good results with **Add to dataset**; removed images move to `removed/`.
 3. **Caption.** Each image's `.txt` starts with `<trigger> <class>`. Describe what *changes* (outfit, place, pose, light), not the face.
 4. **Train** (Quick / Standard / Thorough). SDXL at 1024px, batch 4 / 8 / 16 on 24 / 48 / 80 GB cards (learning rate scaled by √batch), UNet-only with cached text-encoder outputs, bf16, gradient checkpointing. ComfyUI unloads its models and generating pauses until it finishes. The LoRA lands in `ComfyUI/models/loras/obscura/<id>_v<N>.safetensors` and becomes the active version.
 5. **Generate or Remix** with the character selected, add your best new results, and train v2, v3, …
@@ -109,41 +113,34 @@ Parts of the code use the local filesystem on purpose, and nothing else does:
 
 Generation, uploads, previews and results are already pure HTTP/WebSocket to `COMFY_URL`. Splitting the dashboard onto its own host would need object storage for datasets and LoRAs, a training service with its own API, and a sync step into every ComfyUI worker. That is worth it once you scale out to several GPU workers or serverless ComfyUI, and not before.
 
-**Provisioning** (`setup_cloud.sh`, idempotent):
+**Provisioning** (`setup_cloud.sh`, idempotent). A **200 GB volume**: the models alone are ~95 GB (fp16 Wan I2V) and the script refuses to start a download that wouldn't fit.
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/MyunghoonChoi/obscura/main/setup_cloud.sh
 bash setup_cloud.sh
 ```
 
-If the repo is private, GitHub serves 404 for the raw file and for the clone. Create a fine-grained personal access token (read-only *Contents* on this repo) and pass it as `GH_TOKEN`:
+It installs ComfyUI (own venv, PyTorch built for the host's driver), the custom nodes (IPAdapter_plus, VideoHelperSuite, controlnet_aux, Impact Pack + Subpack, ReActor, UltimateSDUpscale, plus insightface / onnxruntime-gpu), every model below, kohya sd-scripts (own venv), and this dashboard (production build, `.env.local` with a generated Basic Auth password). Then it starts ComfyUI on `127.0.0.1:8188` (`--highvram` on 40 GB+ cards) and the dashboard on `0.0.0.0:3000`. Later restarts: `/workspace/start_obscura.sh`.
 
-```bash
-export GH_TOKEN=github_pat_...
-curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o setup_cloud.sh https://raw.githubusercontent.com/MyunghoonChoi/obscura/main/setup_cloud.sh
-bash setup_cloud.sh
-```
+| Role | File | Source |
+| --- | --- | --- |
+| Base (Pony, default) | `checkpoints/ponyDiffusionV6XL.safetensors` | Civitai 290640 |
+| Base (photoreal) | `checkpoints/RealVisXL_V5.0_fp16.safetensors` | `SG161222/RealVisXL_V5.0` |
+| Video | `diffusion_models/wan2.1_i2v_720p_14B_fp16.safetensors` (or `_fp8_scaled` with `WAN_PRECISION=fp8`), `wan2.1_vace_14B_fp16.safetensors`, `text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors`, `vae/wan_2.1_vae.safetensors`, `clip_vision/clip_vision_h.safetensors` | `Comfy-Org/Wan_2.1_ComfyUI_repackaged` |
+| Upscale | `upscale_models/4x-UltraSharp.pth`, `controlnet/controlnet-tile-sdxl-xinsir.safetensors` | `Kim2091/UltraSharp`, `xinsir/controlnet-tile-sdxl-1.0` |
+| Pose | `controlnet/controlnet-openpose-sdxl-xinsir.safetensors`, DWPose torchscript models | `xinsir/controlnet-openpose-sdxl-1.0`, `hr16/*` |
+| Identity | `ipadapter/ip-adapter-faceid-plusv2_sdxl.bin`, `loras/ip-adapter-faceid-plusv2_sdxl_lora.safetensors`, `clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | `h94/IP-Adapter-FaceID`, `h94/IP-Adapter` |
+| Face swap | `hyperswap/hyperswap_1b_256.onnx`, `insightface/inswapper_128.onnx`, CodeFormer, GFPGAN, `ultralytics/bbox/face_yolov8m.pt`, ReActor's NSFW detector | `facefusion/models-3.3.0`, `Gourieff/ReActor`, `AdamCodd/vit-base-nsfw-detector` |
 
-It installs ComfyUI (own venv, PyTorch built for the host's driver), the custom nodes (IPAdapter_plus, AnimateDiff-Evolved, VideoHelperSuite, controlnet_aux, Impact Pack + Subpack, ReActor, plus insightface / onnxruntime-gpu), every model below, kohya sd-scripts (own venv), and this dashboard (production build, `.env.local` with a generated Basic Auth password). Then it starts ComfyUI on `127.0.0.1:8188` (`--highvram` on 40 GB+ cards) and the dashboard on `0.0.0.0:3000`. Later restarts: `/workspace/start_obscura.sh`.
+Check the licences before commercial use: `inswapper_128` is research-only, Pony V6 XL and Wan 2.1 have their own licences.
 
 **Updating.** Push to `main` and the pod redeploys the dashboard by itself within about two minutes (`update_obscura.sh --watch`, log in `/workspace/logs/updater.log`): pull, rebuild, restart the dashboard only, so ComfyUI and any render in progress keep going; a failed build restores the previous one. Run `/workspace/update_obscura.sh` to do it right away, or `AUTO_UPDATE=0 bash setup_cloud.sh` to turn the watcher off. Re-run `bash setup_cloud.sh` itself for new models or node packs, changes to the script, or after a pod stop/start; that restarts ComfyUI too, so do it when idle.
 
 Expose port 3000 only. RunPod's HTTP proxy (`*.proxy.runpod.net`) sits behind Cloudflare, which rejects large request bodies (around 100 MB), so for Remix sources also add port 3000 as a **direct TCP port** and upload through that `IP:port`.
 
-| Role | File | Source |
-| --- | --- | --- |
-| Base (photoreal) | `checkpoints/RealVisXL_V5.0_fp16.safetensors` | `SG161222/RealVisXL_V5.0` |
-| Base (Pony, optional) | `checkpoints/ponyDiffusionV6XL.safetensors` | Civitai 290640 |
-| Pose | `controlnet/controlnet-openpose-sdxl-xinsir.safetensors`, DWPose torchscript models | `xinsir/controlnet-openpose-sdxl-1.0`, `hr16/*` |
-| Identity | `ipadapter/ip-adapter-faceid-plusv2_sdxl.bin`, `loras/ip-adapter-faceid-plusv2_sdxl_lora.safetensors`, `clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors` | `h94/IP-Adapter-FaceID`, `h94/IP-Adapter` |
-| Motion | `animatediff_models/mm_sdxl_v10_beta.ckpt`, `hsxl_temporal_layers.safetensors` (optional) | `guoyww/animatediff`, `hotshotco/Hotshot-XL` |
-| Face swap | `hyperswap/hyperswap_1b_256.onnx`, `insightface/inswapper_128.onnx`, CodeFormer, GFPGAN, `ultralytics/bbox/face_yolov8m.pt` | `facefusion/models-3.3.0`, `Gourieff/ReActor` |
-
-Check the licences before commercial use: `inswapper_128` is research-only, and Pony V6 XL has its own licence.
-
 **Local development** still works against a remote ComfyUI: set `COMFY_URL` (and `COMFY_AUTH_HEADER` if it sits behind an auth proxy) and `npm run dev`. Training and the SD 1.5 header check need the files, so they only work on the GPU box.
 
 ## Customizing
 
-- **Another graph** (Wan, Flux, LTX …): add a builder next to `buildGenerate` / `buildMotionTransfer` / `buildFaceSwap` in `workflow.ts`, or load an API-format JSON exported from ComfyUI and patch node IDs. Streaming, previews and the media proxy keep working unchanged.
+- **Another graph** (Wan 2.2, Flux stills, LTX …): add a builder next to `buildImage` / `buildVideo` / `buildMotionTransfer` / `buildFaceSwap` in `workflow.ts`, or load an API-format JSON exported from ComfyUI and patch node IDs. Streaming, previews and the media proxy keep working unchanged.
 - **Exposing it publicly:** keep `DASHBOARD_PASSWORD` set. Anyone who can reach the dashboard can use your GPU.

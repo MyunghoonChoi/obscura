@@ -6,7 +6,7 @@ import path from "node:path";
 import { CHECKPOINT_DIR } from "@/lib/paths";
 
 import { getNodeSpec, listNodeOptions } from "./client";
-import type { RemixModels } from "./workflow";
+import type { PipelineModels } from "./workflow";
 
 type Family = "sdxl" | "sd15" | "unknown";
 const cache = new Map<string, { mtimeMs: number; family: Family }>();
@@ -51,6 +51,16 @@ export async function sdxlCheckpoints(): Promise<string[]> {
   return all.filter((_, i) => families[i] !== "sd15");
 }
 
+/**
+ * The checkpoint the studio starts on. OBSCURA_DEFAULT_CHECKPOINT wins when installed; otherwise
+ * Pony V6 XL, then the first file. Never "whatever sorts first".
+ */
+export function defaultCheckpoint(checkpoints: string[]): string {
+  const wanted = process.env.OBSCURA_DEFAULT_CHECKPOINT;
+  if (wanted && checkpoints.includes(wanted)) return wanted;
+  return checkpoints.find((c) => /pony/i.test(c)) ?? checkpoints[0] ?? "";
+}
+
 const best = (options: string[], ...preferences: RegExp[]) => {
   for (const re of preferences) {
     const hit = options.find((o) => re.test(o));
@@ -59,40 +69,76 @@ const best = (options: string[], ...preferences: RegExp[]) => {
   return undefined;
 };
 
-export interface RemixAvailability {
-  models: RemixModels;
-  /** What each Remix mode still lacks on this ComfyUI (empty = ready). setup_cloud.sh installs all of it. */
-  missing: { motion: string[]; faceswap: string[] };
-  /** Face-swap refine (FaceDetailer + face detector) is optional; the swap itself works without it. */
+export type Capability = "video" | "motion" | "motionVideo" | "faceswap" | "upscale";
+
+export interface PipelineAvailability {
+  models: PipelineModels;
+  /** What each capability still lacks on this ComfyUI (empty = ready). setup_cloud.sh installs all of it. */
+  missing: Record<Capability, string[]>;
+  /** Face refine (FaceDetailer + face detector) is optional; the swap itself works without it. */
   refineAvailable: boolean;
 }
 
-/** Finds the best installed model for each Remix role and reports anything missing per mode. */
-export async function remixAvailability(): Promise<RemixAvailability> {
-  const [controlNets, swapModels, restorers, detectors, dwpose, faceIdLoader, faceDetailer] = await Promise.all([
+/** Finds the best installed model for each role and reports what every capability is missing. */
+export async function pipelineAvailability(): Promise<PipelineAvailability> {
+  const [controlNets, swapModels, restorers, detectors, upscalers, unets, clips, vaes, clipVisions, nodes] = await Promise.all([
     listNodeOptions("ControlNetLoader", "control_net_name"),
     listNodeOptions("ReActorFaceSwap", "swap_model"),
     listNodeOptions("ReActorFaceSwap", "face_restore_model"),
     listNodeOptions("UltralyticsDetectorProvider", "model_name"),
-    getNodeSpec("DWPreprocessor"),
-    getNodeSpec("IPAdapterUnifiedLoaderFaceID"),
-    getNodeSpec("FaceDetailer"),
+    listNodeOptions("UpscaleModelLoader", "model_name"),
+    listNodeOptions("UNETLoader", "unet_name"),
+    listNodeOptions("CLIPLoader", "clip_name"),
+    listNodeOptions("VAELoader", "vae_name"),
+    listNodeOptions("CLIPVisionLoader", "clip_name"),
+    Promise.all(
+      ["DWPreprocessor", "IPAdapterUnifiedLoaderFaceID", "FaceDetailer", "UltimateSDUpscale", "ReActorFaceBoost", "WanImageToVideo", "WanVaceToVideo"].map(
+        async (n) => [n, !!(await getNodeSpec(n))] as const,
+      ),
+    ).then((pairs) => Object.fromEntries(pairs) as Record<string, boolean>),
   ]);
 
-  const models: RemixModels = {
+  const models: PipelineModels = {
     controlNet: best(controlNets, /openpose.*(xl|sdxl)|xinsir.*openpose|(xl|sdxl).*openpose/i),
+    tileControlNet: best(controlNets, /tile.*(xl|sdxl)|(xl|sdxl).*tile/i),
     swapModel: best(swapModels, /hyperswap_1b/i, /hyperswap/i, /reswapper_256/i, /inswapper_128/i, /./),
     faceRestore: best(restorers, /codeformer/i, /GFPGANv1\.4/i, /GPEN/i) ?? "none",
     faceDetector: best(detectors, /bbox\/face_yolov8m/i, /bbox\/face_yolo/i),
+    upscaler: best(upscalers, /4x-UltraSharp/i, /UltraSharp/i, /ESRGAN_4x|4x_ESRGAN/i, /4x/i),
+    usdu: nodes.UltimateSDUpscale,
+    wanI2V: best(unets, /wan2\.1_i2v_720p_14B.*fp16/i, /wan2\.1_i2v_720p_14B/i, /wan2\.1_i2v.*14B/i),
+    wanVace: best(unets, /wan2\.1_vace_14B/i, /vace.*14B/i),
+    wanTextEncoder: best(clips, /umt5_xxl.*fp8.*scaled/i, /umt5_xxl/i),
+    wanVae: best(vaes, /wan_2\.1_vae/i, /wan.*vae/i),
+    wanClipVision: best(clipVisions, /clip_vision_h/i),
   };
 
+  const wanCommon: string[] = [];
+  if (!models.wanTextEncoder) wanCommon.push("umt5_xxl text encoder (models/text_encoders)");
+  if (!models.wanVae) wanCommon.push("wan_2.1_vae (models/vae)");
+  const video = [...wanCommon];
+  if (!nodes.WanImageToVideo) video.push("a ComfyUI with native Wan nodes (update ComfyUI)");
+  if (!models.wanI2V) video.push("wan2.1_i2v_720p_14B (models/diffusion_models)");
+  if (!models.wanClipVision) video.push("clip_vision_h (models/clip_vision)");
+
   const motion: string[] = [];
-  if (!dwpose) motion.push("comfyui_controlnet_aux (DWPreprocessor)");
-  if (!models.controlNet) motion.push("an SDXL OpenPose ControlNet in models/controlnet");
-  if (!faceIdLoader) motion.push("ComfyUI_IPAdapter_plus (FaceID)");
+  if (!nodes.DWPreprocessor) motion.push("comfyui_controlnet_aux (DWPreprocessor)");
+  if (!models.controlNet) motion.push("an SDXL OpenPose ControlNet (models/controlnet)");
+  if (!nodes.IPAdapterUnifiedLoaderFaceID) motion.push("ComfyUI_IPAdapter_plus (FaceID)");
+  const motionVideo = [...motion, ...wanCommon];
+  if (!nodes.WanVaceToVideo) motionVideo.push("a ComfyUI with native Wan VACE nodes (update ComfyUI)");
+  if (!models.wanVace) motionVideo.push("wan2.1_vace_14B (models/diffusion_models)");
 
   const faceswap: string[] = [];
-  if (!models.swapModel) faceswap.push("ComfyUI-ReActor with a swap model (models/insightface, reswapper or hyperswap)");
+  if (!models.swapModel) faceswap.push("ComfyUI-ReActor with a swap model (models/hyperswap, reswapper or insightface)");
 
-  return { models, missing: { motion, faceswap }, refineAvailable: !!(faceDetailer && faceIdLoader && models.faceDetector) };
+  const upscale: string[] = [];
+  if (!nodes.UltimateSDUpscale) upscale.push("ComfyUI_UltimateSDUpscale");
+  if (!models.upscaler) upscale.push("4x-UltraSharp.pth (models/upscale_models)");
+
+  return {
+    models,
+    missing: { video, motion, motionVideo, faceswap, upscale },
+    refineAvailable: !!(nodes.FaceDetailer && nodes.IPAdapterUnifiedLoaderFaceID && models.faceDetector),
+  };
 }
