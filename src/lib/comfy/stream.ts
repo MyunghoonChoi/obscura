@@ -210,7 +210,7 @@ async function blankResultWarnings(results: GenerationResult[]): Promise<string[
       const { channels } = await sharp(Buffer.from(await res.arrayBuffer())).stats();
       if (channels.every((c) => c.mean < 4))
         return [
-          'The image came back black: ReActor\'s NSFW check blanked it. Turn off "Finish with a face swap" for this render, or use a different Remix source.',
+          "The image came back black: ReActor's NSFW check blanked it. Only Remix › Face swap uses ReActor; use a different source there, or generate the look in the Image tab instead.",
         ];
     } catch {
       // Not fatal: the result still shows; only the explanation is lost.

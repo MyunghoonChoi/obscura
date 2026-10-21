@@ -2,7 +2,7 @@
 
 A private, self-hosted image and video studio that drives **your own ComfyUI** on a cloud GPU (48–80 GB, e.g. RTX 6000 Ada / H100 on RunPod). It is built around **trained characters**: each character gets an SDXL LoRA, every picture of them starts as an SDXL still, and the video models only add motion, so the character looks the same everywhere. It uses no third-party AI APIs and applies no content filters of its own.
 
-- **Image**: SDXL / Pony + character LoRA + IP-Adapter FaceID, face-swap finish, then a true pixel upscale (4x-UltraSharp → UltimateSDUpscale tiles with a tile ControlNet)
+- **Image**: SDXL / Pony + character LoRA + IP-Adapter FaceID, a FaceDetailer face refine, then a true pixel upscale (4x-UltraSharp → UltimateSDUpscale tiles with a tile ControlNet)
 - **Video**: that still becomes frame 1 of a **Wan 2.1 I2V 14B** clip at 720p / 16 fps
 - **Remix** a clip or photo:
   - **Motion transfer**: the source's pose (DWPose) drives a pose-locked still, and for clips **Wan 2.1 VACE 14B** follows the whole movement with that still as the reference
@@ -52,12 +52,13 @@ Key files:
 ```
 still          Checkpoint ─► [LoRA] ─► [clip skip] ─► CLIPTextEncodeSDXL(+/−)
                    └ model ─► [FaceID Plus v2 (starred faces)] ─► KSampler ─► VAEDecode
-               ─► [ReActor swap ─► FaceDetailer refine] ─► [4x-UltraSharp ─► UltimateSDUpscale (+ tile ControlNet)] ─► Save
+               ─► [FaceDetailer face refine: LoRA + FaceID 0.85, denoise 0.40] ─► [4x-UltraSharp ─► UltimateSDUpscale (+ tile ControlNet)] ─► Save
 
 video          still (as above, no upscale) ─► CLIP-ViT-H ─► WanImageToVideo ─► KSampler (uni_pc/simple, 20, cfg 6, shift 8)
                ─► VAEDecode ─► MP4 @ 16 fps
 
-motion · photo source ─► DWPose ─► OpenPose ControlNet XL ─► still pipeline (pose-locked) ─► upscale ─► Save
+motion · photo source (scaled + centre-cropped to the SDXL bucket) ─► DWPose ─► OpenPose ControlNet XL (strength 0.85)
+               ─► img2img from the source at "New look" 0.55 ─► face refine ─► upscale ─► Save
 motion · clip  source @16 fps ─► DWPose (whole clip) ─► WanVaceToVideo(control_video = pose, reference_image = pose-locked
                still of the character from frame 1, strength = Pose strength) ─► KSampler ─► TrimVideoLatent ─► MP4
 
@@ -67,13 +68,13 @@ face swap      source ─► ReActor (HyperSwap 256 > reswapper > inswapper; cli
 
 Design decisions:
 
-- **Every character picture is an SDXL still first.** Wan 2.1 is a stronger video model than anything SDXL-based, but it has no LoRA for your character; seeding it with a finished still (LoRA + FaceID + face swap) keeps the identity while Wan supplies the motion.
+- **Every character picture is an SDXL still first.** Wan 2.1 is a stronger video model than anything SDXL-based, but it has no LoRA for your character; seeding it with a finished still (LoRA + FaceID + face refine) keeps the identity while Wan supplies the motion.
 - **Wan settings are the reference ones** from ComfyUI's example workflows: `uni_pc` / `simple`, 20 steps, cfg 6, shift 8, 81 frames (5 s) at 16 fps, 720p buckets, Wan's own negative prompt. Length snaps to 4n+1 (17–121).
 - **Upscaling resolves detail instead of inventing it**: 4x-UltraSharp enlarges, then UltimateSDUpscale re-samples 1024 px tiles at denoise 0.3 with the character model; the xinsir tile ControlNet (strength 0.5) keeps every tile faithful. 2× of 832×1216 ≈ 1664×2432.
 - **Pony** is a prompt style, not a separate graph: `score_9, score_8_up, score_7_up` / `score_6, score_5, score_4` and clip skip −2. The default checkpoint is Pony V6 XL when installed (`OBSCURA_DEFAULT_CHECKPOINT` overrides), never "whatever sorts first".
 - **Prompt parts stay separate** until the server joins them: `[style tags], [character trigger], [your prompt]`. Your text passes through verbatim, and the graph is serialized with `JSON.stringify`, so nothing in a prompt can break the request. Wan only receives your own text.
-- **Temporal stability of swapped faces** comes from ReActor applying one fixed identity embedding per frame with no sampling noise. FaceBoost restores and upsamples the face crop *before* pasting (sharper than a raw 256 px paste); FaceDetailer re-sampling every frame would flicker, so it runs on stills only. LivePortrait is not a swapper (it animates a portrait with a driving video) and isn't used.
-- **Known limits**: Wan 2.1 is a 2025 model, not magic: fast or complex motion can still warp hands and fabric, and VACE follows the pose, not the source's camera moves. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so and points at the *Finish with a face swap* toggle), and flagged video frames are **dropped**, which shortens the clip and can desync audio. Face-swap clips are capped at 360 frames and 1920 px (VHS keeps every frame in RAM).
+- **ReActor is used by Remix › Face swap only.** Everywhere else the face pass is FaceDetailer: the face region is re-sampled at up to 1024 px with the LoRA model + its own FaceID (0.85) at denoise 0.40, so no 256 px paste touches the image. Temporal stability of swapped faces comes from ReActor applying one fixed identity embedding per frame with no sampling noise. FaceBoost restores and upsamples the face crop *before* pasting (sharper than a raw 256 px paste); FaceDetailer re-sampling every frame would flicker, so it runs on stills only. LivePortrait is not a swapper (it animates a portrait with a driving video) and isn't used.
+- **Known limits**: Wan 2.1 is a 2025 model, not magic: fast or complex motion can still warp hands and fabric, and VACE follows the pose, not the source's camera moves. ReActor ships its own NSFW check (kept as is): a flagged still comes back **black** (the dashboard says so; only Remix › Face swap uses ReActor), and flagged video frames are **dropped**, which shortens the clip and can desync audio. Face-swap clips are capped at 360 frames and 1920 px (VHS keeps every frame in RAM).
 
 ## Character LoRAs
 
@@ -82,7 +83,7 @@ FaceID copies a face from photos. A **LoRA** learns the character, so angles, ex
 **The loop** (`/characters`):
 
 1. **Create** a character. It gets a made-up *trigger word* (e.g. `mina_ob`) that the LoRA binds the identity to.
-2. **Build the dataset.** Drop 15–30 varied photos (or use the 📷+ button in the studio). With only a few, star them and generate variations: until v1 exists, starred photos drive FaceID and the face swap. Keep good results with **Add to dataset**; removed images move to `removed/`.
+2. **Build the dataset.** Drop 15–30 varied photos (or use the 📷+ button in the studio). With only a few, star them and generate variations: until v1 exists, starred photos drive FaceID and the face refine. Keep good results with **Add to dataset**; removed images move to `removed/`.
 3. **Caption.** Each image's `.txt` starts with `<trigger> <class>`. Describe what *changes* (outfit, place, pose, light), not the face.
 4. **Train** (Quick / Standard / Thorough). SDXL at 1024px, batch 4 / 8 / 16 on 24 / 48 / 80 GB cards (learning rate scaled by √batch), UNet-only with cached text-encoder outputs, bf16, gradient checkpointing. ComfyUI unloads its models and generating pauses until it finishes. The LoRA lands in `ComfyUI/models/loras/obscura/<id>_v<N>.safetensors` and becomes the active version.
 5. **Generate or Remix** with the character selected, add your best new results, and train v2, v3, …

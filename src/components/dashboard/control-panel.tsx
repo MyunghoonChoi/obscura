@@ -100,7 +100,7 @@ export function ControlPanel({
   const stillOutput = !isVideo && !isFaceSwap;
 
   const character = characters.find((c) => c.id === p.characterId);
-  const characterFaces = !reference && !!character && (p.useCharacterRefs || isRemix || p.faceSwapAfter) && character.refs.length > 0;
+  const characterFaces = !reference && !!character && (p.useCharacterRefs || isRemix || p.faceRefine) && character.refs.length > 0;
   const hasFace = !!reference || characterFaces;
   const resolution = RESOLUTIONS.find((r) => r.w === p.width && r.h === p.height)?.label ?? "custom";
 
@@ -329,32 +329,57 @@ export function ControlPanel({
         {hasFace && !isFaceSwap && (
           <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
             <span>
-              Finish with a face swap
+              Refine the face with the character
               <span className="block text-[11px] text-muted-foreground">
-                Pastes the reference face onto the {isVideo ? "first frame, which Wan then carries through the clip" : "result"}{" "}
-                (ReActor), so the likeness doesn&apos;t depend on the LoRA.{!isVideo && " Stills get the face refine pass too."}
+                FaceDetailer re-samples the face of the {isVideo ? "first frame (Wan carries it through the clip)" : "result"} at up
+                to 1024 px with the LoRA + FaceID (0.85, denoise {p.refineDenoise.toFixed(2)}). No pixel paste, no ReActor.
+                {!options?.refineAvailable && " Needs Impact Pack + a face detector (setup_cloud.sh)."}
               </span>
             </span>
             <input
               type="checkbox"
-              checked={p.faceSwapAfter}
-              onChange={(e) => setParams({ faceSwapAfter: e.target.checked })}
+              checked={p.faceRefine}
+              onChange={(e) => setParams({ faceRefine: e.target.checked })}
               className="size-4 accent-primary"
             />
           </label>
+        )}
+        {hasFace && !isFaceSwap && p.faceRefine && (
+          <ParamSlider
+            label="Refine denoise"
+            hint="How much the face pass may change. 0.35–0.45 locks the likeness while keeping the pose and lighting of the face."
+            value={p.refineDenoise}
+            min={0.1}
+            max={0.7}
+            step={0.05}
+            format={(v) => v.toFixed(2)}
+            onChange={(refineDenoise) => setParams({ refineDenoise })}
+          />
         )}
       </div>
 
       <Separator />
 
       <div className="space-y-5">
+        {isMotion && !sourceIsVideo && (
+          <ParamSlider
+            label="New look (denoise)"
+            hint="How far the result may move from the source photo. 0.45–0.65 keeps its composition and lighting and changes outfit and background to the prompt; 1.0 redraws everything."
+            value={p.denoise}
+            min={0.3}
+            max={1}
+            step={0.05}
+            format={(v) => v.toFixed(2)}
+            onChange={(denoise) => setParams({ denoise })}
+          />
+        )}
         {isMotion && (
           <ParamSlider
-            label="Pose strength"
+            label={sourceIsVideo ? "Pose strength (VACE)" : "ControlNet strength"}
             hint={
               sourceIsVideo
                 ? "How tightly Wan VACE follows the source's movement. 0.8–1.0 is typical."
-                : "How tightly the still follows the source's pose (OpenPose ControlNet). 0.7–1.0 is typical."
+                : "How strictly the OpenPose ControlNet holds the source's pose against the prompt. 0.85 default; lower lets the prompt move the body more."
             }
             value={p.controlStrength}
             min={0.3}
@@ -362,18 +387,6 @@ export function ControlPanel({
             step={0.05}
             format={(v) => v.toFixed(2)}
             onChange={(controlStrength) => setParams({ controlStrength })}
-          />
-        )}
-        {isMotion && !sourceIsVideo && (
-          <ParamSlider
-            label="New look"
-            hint="1.0 redraws everything from your prompt. Lower values start from the source photo and keep more of its colours and layout."
-            value={p.denoise}
-            min={0.3}
-            max={1}
-            step={0.05}
-            format={(v) => v.toFixed(2)}
-            onChange={(denoise) => setParams({ denoise })}
           />
         )}
         {isFaceSwap && (

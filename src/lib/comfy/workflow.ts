@@ -206,27 +206,27 @@ function base(g: Graph, p: GenerationParams, size: { width: number; height: numb
   return { model, clip, vae, positive, negative };
 }
 
-/** Loads the reference faces and patches the model with IP-Adapter FaceID Plus v2 (insightface + CLIP-ViT-H). */
-function faceId(g: Graph, model: Link, faces: ComfyFileRef[], weight: number): Link {
-  if (!faces.length || weight <= 0) return model;
+/** The reference faces as one batched IMAGE. LoadImage ids "10", "101", … are shared by every pass that needs them. */
+function loadFaces(g: Graph, faces: ComfyFileRef[]): Link {
   let batch: Link | undefined;
   faces.forEach((f, i) => {
-    const img = g.add(i === 0 ? "10" : `10${i}`, "LoadImage", { image: refPath(f) }, faces.length > 1 ? `Loading face ${i + 1}` : "Loading face");
+    const id = i === 0 ? "10" : `10${i}`;
+    const img: Link = g.workflow[id] ? [id, 0] : g.add(id, "LoadImage", { image: refPath(f) }, faces.length > 1 ? `Loading face ${i + 1}` : "Loading face");
     batch = batch ? g.add(`14${i}`, "ImageBatch", { image1: batch, image2: img }, "Batching faces") : img;
   });
-  g.add(
-    "12",
-    "IPAdapterUnifiedLoaderFaceID",
-    { model, preset: "FACEID PLUS V2", lora_strength: 0.6, provider: "CUDA" },
-    "Loading FaceID",
-  );
+  return batch!;
+}
+
+/** Patches `model` with IP-Adapter FaceID Plus v2 (insightface + CLIP-ViT-H). `ids` keep separate passes apart. */
+function applyFaceId(g: Graph, ids: [string, string], model: Link, faces: ComfyFileRef[], weight: number, title: string): Link {
+  g.add(ids[0], "IPAdapterUnifiedLoaderFaceID", { model, preset: "FACEID PLUS V2", lora_strength: 0.6, provider: "CUDA" }, "Loading FaceID");
   return g.add(
-    "13",
+    ids[1],
     "IPAdapterFaceID",
     {
-      model: ["12", 0],
-      ipadapter: ["12", 1],
-      image: batch,
+      model: [ids[0], 0],
+      ipadapter: [ids[0], 1],
+      image: loadFaces(g, faces),
       weight,
       weight_faceidv2: weight,
       weight_type: "linear",
@@ -236,8 +236,14 @@ function faceId(g: Graph, model: Link, faces: ComfyFileRef[], weight: number): L
       end_at: 1.0,
       embeds_scaling: "V only",
     },
-    "Applying character identity",
+    title,
   );
+}
+
+/** Identity for the main sampling pass; skipped when there are no faces or the user turned FaceID off. */
+function faceId(g: Graph, model: Link, faces: ComfyFileRef[], weight: number): Link {
+  if (!faces.length || weight <= 0) return model;
+  return applyFaceId(g, ["12", "13"], model, faces, weight, "Applying character identity");
 }
 
 /** One SDXL sampling pass and decode. */
@@ -453,54 +459,69 @@ function swapFace(
     "Swapping face",
   );
   const refine = "refine" in mode ? mode.refine : undefined;
-  if (refine && models.faceDetector) {
-    g.add("81", "UltralyticsDetectorProvider", { model_name: models.faceDetector }, "Loading face detector");
-    out = g.add(
-      "82",
-      "FaceDetailer",
-      {
-        image: out,
-        model: refine.model,
-        clip: refine.c.clip,
-        vae: refine.c.vae,
-        guide_size: 1024,
-        guide_size_for: true,
-        max_size: 1536,
-        seed,
-        steps: p.steps,
-        cfg: p.cfg,
-        sampler_name: p.sampler,
-        scheduler: p.scheduler,
-        positive: refine.c.positive,
-        negative: refine.c.negative,
-        denoise: p.refineDenoise,
-        feather: 5,
-        noise_mask: true,
-        force_inpaint: true,
-        bbox_threshold: 0.5,
-        bbox_dilation: 10,
-        bbox_crop_factor: 3.0,
-        sam_detection_hint: "center-1",
-        sam_dilation: 0,
-        sam_threshold: 0.93,
-        sam_bbox_expansion: 0,
-        sam_mask_hint_threshold: 0.7,
-        sam_mask_hint_use_negative: "False",
-        drop_size: 10,
-        bbox_detector: ["81", 0],
-        wildcard: "",
-        cycle: 1,
-      },
-      "Refining face",
-    );
-  }
+  if (refine && models.faceDetector) out = faceDetailer(g, p, out, refine, seed, models.faceDetector);
   return out;
 }
 
-/** Still → [swap + refine]; the identity model (LoRA + FaceID, no video wrapping) drives the refine. */
-function finishStill(g: Graph, p: GenerationParams, input: BuildInput, images: Link, c: Conditioned, identity: Link, seed: number): Link {
-  if (!p.faceSwapAfter || !input.faces?.length || !input.models.swapModel) return images;
-  return swapFace(g, p, input, images, seed, { refine: p.refineFace ? { c, model: identity } : undefined });
+/**
+ * FaceDetailer: detects the face (face_yolov8m), crops it up to 1024 px, re-samples the crop with
+ * `model` at refineDenoise and blends it back. Detail and likeness come from the model, so this is
+ * also how the character's face is put on a still without any pixel paste.
+ */
+function faceDetailer(g: Graph, p: GenerationParams, images: Link, refine: { c: Conditioned; model: Link }, seed: number, detector: string): Link {
+  g.add("81", "UltralyticsDetectorProvider", { model_name: detector }, "Loading face detector");
+  return g.add(
+    "82",
+    "FaceDetailer",
+    {
+      image: images,
+      model: refine.model,
+      clip: refine.c.clip,
+      vae: refine.c.vae,
+      guide_size: 1024,
+      guide_size_for: true,
+      max_size: 1536,
+      seed,
+      steps: p.steps,
+      cfg: p.cfg,
+      sampler_name: p.sampler,
+      scheduler: p.scheduler,
+      positive: refine.c.positive,
+      negative: refine.c.negative,
+      denoise: p.refineDenoise,
+      feather: 5,
+      noise_mask: true,
+      force_inpaint: true,
+      bbox_threshold: 0.5,
+      bbox_dilation: 10,
+      bbox_crop_factor: 3.0,
+      sam_detection_hint: "center-1",
+      sam_dilation: 0,
+      sam_threshold: 0.93,
+      sam_bbox_expansion: 0,
+      sam_mask_hint_threshold: 0.7,
+      sam_mask_hint_use_negative: "False",
+      drop_size: 10,
+      bbox_detector: ["81", 0],
+      wildcard: "",
+      cycle: 1,
+    },
+    "Refining face",
+  );
+}
+
+/** FaceID weight of the face-refine pass; fixed so the pass locks the identity even when the main pass ran without FaceID. */
+const REFINE_FACEID_WEIGHT = 0.85;
+
+/**
+ * Still → FaceDetailer face pass driven by the character LoRA model + its own FaceID. No ReActor:
+ * the face is re-sampled at up to 1024 px rather than pasted from a 256 px swap.
+ */
+function refineFaceStill(g: Graph, p: GenerationParams, input: BuildInput, images: Link, c: Conditioned, seed: number): Link {
+  const faces = input.faces ?? [];
+  if (!p.faceRefine || !faces.length || !input.models.faceDetector) return images;
+  const model = applyFaceId(g, ["16", "17"], c.model, faces, REFINE_FACEID_WEIGHT, "Applying identity for the face refine");
+  return faceDetailer(g, p, images, { c, model }, seed, input.models.faceDetector);
 }
 
 // ── Wan 2.1 building blocks ─────────────────────────────────────────────────
@@ -608,7 +629,7 @@ function buildImage(g: Graph, p: GenerationParams, input: BuildInput, seed: numb
   const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
   const latent = g.add("30", "EmptyLatentImage", { width: size.width, height: size.height, batch_size: 1 }, "Preparing latent");
   let images = sampleStill(g, p, { ...c, model: identity }, latent, seed, 1);
-  images = finishStill(g, p, input, images, c, identity, seed);
+  images = refineFaceStill(g, p, input, images, c, seed);
   images = upscaleStill(g, p, images, c, identity, input.models, seed);
   save(g, images, false);
   return size;
@@ -622,7 +643,7 @@ function buildVideo(g: Graph, p: GenerationParams, input: BuildInput, seed: numb
   const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
   const latent = g.add("30", "EmptyLatentImage", { width: stillSize.width, height: stillSize.height, batch_size: 1 }, "Preparing latent");
   let still = sampleStill(g, p, { ...c, model: identity }, latent, seed, 1);
-  still = finishStill(g, p, input, still, c, identity, seed);
+  still = refineFaceStill(g, p, input, still, c, seed);
   const frames = wanImageToVideo(g, p, still, wanSize, snapWanLength(p.frames), seed, input.models);
   save(g, frames, { fps: WAN_FPS });
   return wanSize;
@@ -647,13 +668,14 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
       "Applying pose",
     );
     const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-    // denoise 1 redraws everything from the prompt; lower starts from the source to keep its look.
+    // "New look": denoise 1 redraws everything from the prompt; lower starts from the source (already
+    // scaled and centre-cropped to the bucket above, so VAEEncode and the latent always agree) and keeps its look.
     const latent =
       p.denoise < 1
         ? g.add("31", "VAEEncode", { pixels: scaled, vae: c.vae }, "Encoding source")
         : g.add("30", "EmptyLatentImage", { width: size.width, height: size.height, batch_size: 1 }, "Preparing latent");
     let images = sampleStill(g, p, { model: identity, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, p.denoise);
-    images = finishStill(g, p, input, images, c, identity, seed);
+    images = refineFaceStill(g, p, input, images, c, seed);
     images = upscaleStill(g, p, images, c, identity, models, seed);
     save(g, images, false);
     return size;
@@ -681,7 +703,7 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
   const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
   const latent = g.add("30", "EmptyLatentImage", { width: stillSize.width, height: stillSize.height, batch_size: 1 }, "Preparing latent");
   let still = sampleStill(g, p, { model: identity, vae: c.vae, positive: ["61", 0], negative: ["61", 1] }, latent, seed, 1);
-  still = finishStill(g, p, input, still, c, identity, seed);
+  still = refineFaceStill(g, p, input, still, c, seed);
 
   const frames = wanVace(g, p, poseClip, still, wanSize, length, seed, models);
   save(g, frames, { fps: WAN_FPS });
@@ -703,7 +725,7 @@ function buildFaceSwap(g: Graph, p: GenerationParams, input: BuildInput, seed: n
     if (p.refineFace && input.models.faceDetector) {
       const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
       const c = base(g, p, size, input.character);
-      refine = { c, model: faceId(g, c.model, input.faces ?? [], p.identityWeight) };
+      refine = { c, model: applyFaceId(g, ["16", "17"], c.model, input.faces ?? [], REFINE_FACEID_WEIGHT, "Applying identity for the face refine") };
     }
     images = swapFace(g, p, input, src.frames, seed, { refine });
   }

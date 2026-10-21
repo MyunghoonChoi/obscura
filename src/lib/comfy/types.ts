@@ -40,17 +40,21 @@ export interface GenerationParams {
   loraStrength: number;
   /** Feed the character's starred dataset images to FaceID (when no one-off face reference is set). */
   useCharacterRefs: boolean;
-  /** Finish stills (and the first frame of videos) by pasting the reference face on with ReActor; stills also get refineFace. */
-  faceSwapAfter: boolean;
+  /**
+   * Finish stills (and the first frame of videos) with a FaceDetailer pass driven by the character LoRA
+   * + FaceID (weight 0.85, denoise refineDenoise). No ReActor involved; that is Remix › Face swap only.
+   */
+  faceRefine: boolean;
 
   // ── Remix ──
   remixMode: RemixMode;
-  /** Pose strength: OpenPose ControlNet on stills, VACE control strength on clips. */
+  /** ControlNet strength on stills (OpenPose), VACE control strength on clips. */
   controlStrength: number;
-  /** Motion transfer on a still: 1 = redraw everything from the prompt; lower keeps more of the source's colours/layout. */
+  /** Motion transfer on a still ("New look"): 1 = redraw everything from the prompt; ~0.55 keeps the source's composition and lighting and changes outfit/background to taste. */
   denoise: number;
   /** Face swap: refine the swapped face with the character LoRA + FaceID (stills only, see workflow.ts). */
   refineFace: boolean;
+  /** Denoise of every FaceDetailer pass (face refine on stills, face-swap refine). */
   refineDenoise: number;
   /** Face-swap video: frames read from the source. 0 = the whole clip, up to FACESWAP_MAX_FRAMES. */
   remixFrameCap: number;
@@ -100,12 +104,12 @@ export const DEFAULT_PARAMS: GenerationParams = {
   characterId: "",
   loraStrength: 0.8,
   useCharacterRefs: true,
-  faceSwapAfter: true,
+  faceRefine: true,
   remixMode: "motion",
-  controlStrength: 0.9,
-  denoise: 1,
+  controlStrength: 0.85,
+  denoise: 0.55,
   refineFace: true,
-  refineDenoise: 0.35,
+  refineDenoise: 0.4,
   remixFrameCap: 0,
   sourceWidth: 0,
   sourceHeight: 0,

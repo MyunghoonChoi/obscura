@@ -84,14 +84,16 @@ export async function POST(req: Request) {
       character = resolved.binding;
       if (!faces.length) {
         faces.push(...resolved.faces);
-        if (resolved.faceIdOff) params.identityWeight = 0; // faces are for the swap only
+        if (resolved.faceIdOff) params.identityWeight = 0; // faces are for the face refine only
       }
       warnings.push(...resolved.warnings);
     }
     if (isFaceSwap && !faces.length)
       return bad("Face swap needs a face: pick a character with starred photos, or drop a one-off face reference.");
-    if (!isFaceSwap && params.faceSwapAfter && faces.length && !models.swapModel)
-      warnings.push("Face swap finish skipped: no swap model installed (run setup_cloud.sh).");
+    if (!isFaceSwap && params.faceRefine && faces.length && !availability.refineAvailable) {
+      warnings.push("Face refine skipped: needs Impact Pack, a face detector and IPAdapter_plus (run setup_cloud.sh).");
+      params.faceRefine = false;
+    }
 
     const { workflow, labels, seed, width, height } = buildWorkflow(params, { faces, character, source, models });
     const clientId = crypto.randomUUID();
@@ -135,12 +137,13 @@ async function resolveCharacter(
     if (!loraName) return { error: `ComfyUI can't see ${version.loraFile}. Is ComfyUI running on the same machine?` };
   }
 
-  // FaceID gets the starred faces when asked for (or when nothing else carries the identity); the
-  // face-swap finish needs them regardless. Upload if either wants them; FaceID is switched off below if not.
+  // FaceID on the main pass gets the starred faces when asked for (or when nothing else carries the
+  // identity); the face refine needs them regardless. Upload if either wants them; main-pass FaceID is
+  // switched off below if not.
   const forFaceId = params.useCharacterRefs || legacyLora || params.mode === "remix";
-  const forSwap = params.faceSwapAfter && params.mode !== "remix";
+  const forRefine = params.faceRefine && params.mode !== "remix";
   const faces: ComfyFileRef[] = [];
-  if (withFaces && (forFaceId || forSwap)) {
+  if (withFaces && (forFaceId || forRefine)) {
     for (const name of c.refs.slice(0, MAX_CHARACTER_FACES)) {
       const p = imagePath(c.id, name);
       const bytes = p ? await fs.readFile(p).catch(() => null) : null;
@@ -187,7 +190,7 @@ function sanitize(input: Partial<GenerationParams>): GenerationParams {
     characterId: typeof p.characterId === "string" ? p.characterId : "",
     loraStrength: clamp(p.loraStrength, 0, 1.5, DEFAULT_PARAMS.loraStrength),
     useCharacterRefs: p.useCharacterRefs !== false,
-    faceSwapAfter: p.faceSwapAfter !== false,
+    faceRefine: p.faceRefine !== false,
     controlStrength: clamp(p.controlStrength, 0, 2, DEFAULT_PARAMS.controlStrength),
     denoise: clamp(p.denoise, 0.3, 1, 1),
     refineFace: p.refineFace !== false,
