@@ -137,6 +137,12 @@ fetch "$HF/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx"    
 fetch "$HF/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/codeformer-v0.1.0.pth" "$M/facerestore_models/codeformer-v0.1.0.pth"
 fetch "$HF/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/GFPGANv1.4.pth"    "$M/facerestore_models/GFPGANv1.4.pth"
 fetch "$HF/datasets/Gourieff/ReActor/resolve/main/models/detection/bbox/face_yolov8m.pt"       "$M/ultralytics/bbox/face_yolov8m.pt"
+# ReActor's NSFW check: when this detector is missing and its on-demand download fails, ReActor treats
+# EVERY image as NSFW and returns black frames. Fetching it here removes that failure mode.
+NSFW=$M/nsfw_detector/vit-base-nsfw-detector
+fetch "$HF/AdamCodd/vit-base-nsfw-detector/resolve/main/config.json"               "$NSFW/config.json"
+fetch "$HF/AdamCodd/vit-base-nsfw-detector/resolve/main/model.safetensors"         "$NSFW/model.safetensors"
+fetch "$HF/AdamCodd/vit-base-nsfw-detector/resolve/main/preprocessor_config.json"  "$NSFW/preprocessor_config.json"
 
 # ── kohya sd-scripts (SDXL character LoRAs) ─────────────────────────────────
 log "LoRA trainer (kohya sd-scripts)"
