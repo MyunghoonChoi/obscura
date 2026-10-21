@@ -116,6 +116,14 @@ curl -fsSLO https://raw.githubusercontent.com/MyunghoonChoi/obscura/main/setup_c
 bash setup_cloud.sh
 ```
 
+If the repo is private, GitHub serves 404 for the raw file and for the clone. Create a fine-grained personal access token (read-only *Contents* on this repo) and pass it as `GH_TOKEN`:
+
+```bash
+export GH_TOKEN=github_pat_...
+curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o setup_cloud.sh https://raw.githubusercontent.com/MyunghoonChoi/obscura/main/setup_cloud.sh
+bash setup_cloud.sh
+```
+
 It installs ComfyUI (own venv, PyTorch built for the host's driver), the custom nodes (IPAdapter_plus, AnimateDiff-Evolved, VideoHelperSuite, controlnet_aux, Impact Pack + Subpack, ReActor, plus insightface / onnxruntime-gpu), every model below, kohya sd-scripts (own venv), and this dashboard (production build, `.env.local` with a generated Basic Auth password). Then it starts ComfyUI on `127.0.0.1:8188` (`--highvram` on 40 GB+ cards) and the dashboard on `0.0.0.0:3000`. Later restarts: `/workspace/start_obscura.sh`.
 
 Expose port 3000 only. RunPod's HTTP proxy (`*.proxy.runpod.net`) sits behind Cloudflare, which rejects large request bodies (around 100 MB), so for Remix sources also add port 3000 as a **direct TCP port** and upload through that `IP:port`.

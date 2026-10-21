@@ -13,6 +13,8 @@
 #   WORKSPACE           persistent root (RunPod network volume)              default /workspace
 #   OBSCURA_REPO        dashboard git URL                                    default GitHub origin
 #   DASHBOARD_PASSWORD  Basic Auth for the dashboard (generated if unset)
+#   GH_TOKEN            GitHub token when the dashboard repo is private (fine-grained PAT, read-only
+#                       Contents on that repo); also use it to fetch this script, see README
 #   CIVITAI_TOKEN       for Civitai downloads that require login
 #   HF_TOKEN            for gated Hugging Face files
 #   WITH_PONY=1         also fetch Pony Diffusion V6 XL (Civitai)
@@ -145,8 +147,15 @@ TPY=$TRAINER/venv/bin/python
 
 # ── Obscura dashboard ───────────────────────────────────────────────────────
 log "Obscura dashboard"
-if [ -d "$APP/.git" ]; then git -C "$APP" pull -q --ff-only || warn "could not update the dashboard"
-else git clone -q "$OBSCURA_REPO" "$APP"; fi
+# A private repo needs the token in the clone URL (it stays in .git/config on this pod only).
+CLONE_URL=$OBSCURA_REPO
+if [ -n "${GH_TOKEN:-}" ] && [[ $OBSCURA_REPO == https://github.com/* ]]; then
+  CLONE_URL="https://x-access-token:${GH_TOKEN}@github.com/${OBSCURA_REPO#https://github.com/}"
+fi
+if [ -d "$APP/.git" ]; then
+  git -C "$APP" remote set-url origin "$CLONE_URL"
+  git -C "$APP" pull -q --ff-only || warn "could not update the dashboard"
+else git clone -q "$CLONE_URL" "$APP"; fi
 ENV_FILE=$APP/.env.local
 if [ ! -f "$ENV_FILE" ]; then
   PASSWORD=${DASHBOARD_PASSWORD:-$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)}
