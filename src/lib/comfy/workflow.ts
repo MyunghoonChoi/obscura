@@ -339,13 +339,101 @@ const FACESWAP_MAX_SIDE = 1920;
 
 // ── Graphs ──────────────────────────────────────────────────────────────────
 
-/** Text → image/video with the character's LoRA + FaceID identity. */
+/** The reference face as a LoadImage node (shared by FaceID and the swap; both use id "10"). */
+function faceNode(g: Graph, face: ComfyFileRef): Link {
+  return g.workflow["10"] ? ["10", 0] : g.add("10", "LoadImage", { image: refPath(face) }, "Loading character face");
+}
+
+/**
+ * ReActor pastes the first reference face onto every frame of `images` (one fixed identity embedding,
+ * no sampling noise, so it is stable across frames), then CodeFormer restores it. With `refine` set
+ * (stills only), FaceDetailer re-samples the face region with the LoRA + FaceID model for detail.
+ */
+function swapFace(
+  g: Graph,
+  p: GenerationParams,
+  input: BuildInput,
+  images: Link,
+  seed: number,
+  refine?: { c: Conditioned; model: Link },
+): Link {
+  const models = input.models!;
+  const face = faceNode(g, input.faces![0]);
+  let out = g.add(
+    "80",
+    "ReActorFaceSwap",
+    {
+      enabled: true,
+      input_image: images,
+      swap_model: models.swapModel,
+      facedetection: "retinaface_resnet50",
+      face_restore_model: models.faceRestore ?? "none",
+      face_restore_visibility: 1,
+      codeformer_weight: 0.5,
+      detect_gender_input: "no",
+      detect_gender_source: "no",
+      input_faces_index: "0",
+      source_faces_index: "0",
+      console_log_level: 1,
+      source_image: face,
+    },
+    "Swapping face",
+  );
+  if (refine && models.faceDetector) {
+    g.add("81", "UltralyticsDetectorProvider", { model_name: models.faceDetector }, "Loading face detector");
+    out = g.add(
+      "82",
+      "FaceDetailer",
+      {
+        image: out,
+        model: refine.model,
+        clip: refine.c.clip,
+        vae: refine.c.vae,
+        guide_size: 1024,
+        guide_size_for: true,
+        max_size: 1536,
+        seed,
+        steps: p.steps,
+        cfg: p.cfg,
+        sampler_name: p.sampler,
+        scheduler: p.scheduler,
+        positive: refine.c.positive,
+        negative: refine.c.negative,
+        denoise: p.refineDenoise,
+        feather: 5,
+        noise_mask: true,
+        force_inpaint: true,
+        bbox_threshold: 0.5,
+        bbox_dilation: 10,
+        bbox_crop_factor: 3.0,
+        sam_detection_hint: "center-1",
+        sam_dilation: 0,
+        sam_threshold: 0.93,
+        sam_bbox_expansion: 0,
+        sam_mask_hint_threshold: 0.7,
+        sam_mask_hint_use_negative: "False",
+        drop_size: 10,
+        bbox_detector: ["81", 0],
+        wildcard: "",
+        cycle: 1,
+      },
+      "Refining face",
+    );
+  }
+  return out;
+}
+
+/**
+ * Text → image/video with the character's LoRA + FaceID identity. With faceSwapAfter (and a swap model
+ * installed) the render is finished by pasting the reference face on, which pins the likeness
+ * regardless of how well the LoRA learned it.
+ */
 function buildGenerate(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const isVideo = p.mode === "video";
   const size = fitResolution(p.width, p.height);
   const c = base(g, p, size, input.character);
-  let model = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-  if (isVideo) model = animate(g, model, p.motionModule);
+  const identity = faceId(g, c.model, input.faces ?? [], p.identityWeight);
+  const model = isVideo ? animate(g, identity, p.motionModule) : identity;
 
   const latent = g.add(
     "30",
@@ -353,7 +441,11 @@ function buildGenerate(g: Graph, p: GenerationParams, input: BuildInput, seed: n
     { width: size.width, height: size.height, batch_size: isVideo ? p.frames : 1 },
     "Preparing latent",
   );
-  const images = sampleAndDecode(g, p, { ...c, model }, latent, seed, 1);
+  let images = sampleAndDecode(g, p, { ...c, model }, latent, seed, 1);
+  if (p.faceSwapAfter && input.faces?.length && input.models?.swapModel) {
+    // Refine re-samples each frame independently, which would flicker, so it stays off for video.
+    images = swapFace(g, p, input, images, seed, !isVideo && p.refineFace ? { c, model: identity } : undefined);
+  }
   save(g, images, isVideo && { fps: p.fps });
   return size;
 }
@@ -429,79 +521,16 @@ function buildMotionTransfer(g: Graph, p: GenerationParams, input: BuildInput, s
 function buildFaceSwap(g: Graph, p: GenerationParams, input: BuildInput, seed: number) {
   const source = input.source!;
   const isVideo = source.kind === "video";
-  const models = input.models!;
-  const face = input.faces![0];
   // Face swap keeps every source frame as filmed; fps 0 = no resampling.
   const src = loadSource(g, p, source, 0, FACESWAP_MAX_SIDE);
 
-  g.add("10", "LoadImage", { image: refPath(face) }, "Loading character face");
-  let images = g.add(
-    "80",
-    "ReActorFaceSwap",
-    {
-      enabled: true,
-      input_image: src.frames,
-      swap_model: models.swapModel,
-      facedetection: "retinaface_resnet50",
-      face_restore_model: models.faceRestore ?? "none",
-      face_restore_visibility: 1,
-      codeformer_weight: 0.5,
-      detect_gender_input: "no",
-      detect_gender_source: "no",
-      input_faces_index: "0",
-      source_faces_index: "0",
-      console_log_level: 1,
-      source_image: ["10", 0],
-    },
-    "Swapping face",
-  );
-
-  if (!isVideo && p.refineFace && models.faceDetector) {
+  let refine: { c: Conditioned; model: Link } | undefined;
+  if (!isVideo && p.refineFace && input.models!.faceDetector) {
     const size = { width: Math.max(p.sourceWidth, 64), height: Math.max(p.sourceHeight, 64) };
     const c = base(g, p, size, input.character);
-    // FaceID reuses node ids 10/12/13; the swap above already loaded the first face as node 10.
-    const model = faceId(g, c.model, input.faces ?? [], p.identityWeight);
-    g.add("81", "UltralyticsDetectorProvider", { model_name: models.faceDetector }, "Loading face detector");
-    images = g.add(
-      "82",
-      "FaceDetailer",
-      {
-        image: images,
-        model,
-        clip: c.clip,
-        vae: c.vae,
-        guide_size: 1024,
-        guide_size_for: true,
-        max_size: 1536,
-        seed,
-        steps: p.steps,
-        cfg: p.cfg,
-        sampler_name: p.sampler,
-        scheduler: p.scheduler,
-        positive: c.positive,
-        negative: c.negative,
-        denoise: p.refineDenoise,
-        feather: 5,
-        noise_mask: true,
-        force_inpaint: true,
-        bbox_threshold: 0.5,
-        bbox_dilation: 10,
-        bbox_crop_factor: 3.0,
-        sam_detection_hint: "center-1",
-        sam_dilation: 0,
-        sam_threshold: 0.93,
-        sam_bbox_expansion: 0,
-        sam_mask_hint_threshold: 0.7,
-        sam_mask_hint_use_negative: "False",
-        drop_size: 10,
-        bbox_detector: ["81", 0],
-        wildcard: "",
-        cycle: 1,
-      },
-      "Refining face",
-    );
+    refine = { c, model: faceId(g, c.model, input.faces ?? [], p.identityWeight) };
   }
-
+  const images = swapFace(g, p, input, src.frames, seed, refine);
   save(g, images, isVideo && { fps: src.fps!, audio: src.audio });
   return { width: 0, height: 0 };
 }

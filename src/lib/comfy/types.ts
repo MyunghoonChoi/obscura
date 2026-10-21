@@ -41,6 +41,8 @@ export interface GenerationParams {
   loraStrength: number;
   /** Feed the character's starred dataset images to FaceID (when no one-off face reference is set). */
   useCharacterRefs: boolean;
+  /** Image/Video: finish by pasting the reference face on with ReActor (exact likeness); stills also get refineFace. */
+  faceSwapAfter: boolean;
 
   // ── Remix ──
   remixMode: RemixMode;
@@ -101,6 +103,7 @@ export const DEFAULT_PARAMS: GenerationParams = {
   characterId: "",
   loraStrength: 0.8,
   useCharacterRefs: true,
+  faceSwapAfter: true,
   remixMode: "motion",
   controlStrength: 0.9,
   denoise: 1,

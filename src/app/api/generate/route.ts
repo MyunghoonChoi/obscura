@@ -80,11 +80,21 @@ export async function POST(req: Request) {
       const resolved = await resolveCharacter(params, faces.length === 0 || isFaceSwap);
       if ("error" in resolved) return bad(resolved.error);
       character = resolved.binding;
-      if (!faces.length) faces.push(...resolved.faces);
+      if (!faces.length) {
+        faces.push(...resolved.faces);
+        if (resolved.faceIdOff) params.identityWeight = 0; // faces are for the swap only
+      }
       warnings.push(...resolved.warnings);
     }
     if (isFaceSwap && !faces.length)
       return bad("Face swap needs a face: pick a character with starred photos, or drop a one-off face reference.");
+
+    // Image/Video can finish with a face swap; without a swap model it's skipped with a note rather than refused.
+    if (!isRemix && params.faceSwapAfter && faces.length) {
+      const remix = await remixAvailability();
+      if (remix.models.swapModel) models = remix.models;
+      else warnings.push("Face swap finish skipped: no swap model installed (run setup_cloud.sh).");
+    }
 
     const { workflow, labels, seed, width, height } = buildWorkflow(params, { faces, character, source, models });
     const clientId = crypto.randomUUID();
@@ -107,7 +117,7 @@ const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg"
 async function resolveCharacter(
   params: GenerationParams,
   withFaces: boolean,
-): Promise<{ binding: CharacterBinding; faces: ComfyFileRef[]; warnings: string[] } | { error: string }> {
+): Promise<{ binding: CharacterBinding; faces: ComfyFileRef[]; faceIdOff: boolean; warnings: string[] } | { error: string }> {
   const c = await getCharacter(params.characterId);
   if (!c) return { error: "That character no longer exists." };
 
@@ -128,8 +138,12 @@ async function resolveCharacter(
     if (!loraName) return { error: `ComfyUI can't see ${version.loraFile}. Is ComfyUI running on the same machine?` };
   }
 
+  // FaceID gets the starred faces when asked for (or when nothing else carries the identity); the
+  // face-swap finish needs them regardless. Upload if either wants them; FaceID is switched off below if not.
+  const forFaceId = params.useCharacterRefs || legacyLora || params.mode === "remix";
+  const forSwap = params.faceSwapAfter && params.mode !== "remix";
   const faces: ComfyFileRef[] = [];
-  if (withFaces && (params.useCharacterRefs || legacyLora || params.mode === "remix") && params.identityWeight > 0) {
+  if (withFaces && (forFaceId || forSwap)) {
     for (const name of c.refs.slice(0, MAX_CHARACTER_FACES)) {
       const p = imagePath(c.id, name);
       const bytes = p ? await fs.readFile(p).catch(() => null) : null;
@@ -142,6 +156,7 @@ async function resolveCharacter(
   return {
     binding: { trigger: c.trigger, classWord: c.classWord, loraName, loraStrength: params.loraStrength },
     faces,
+    faceIdOff: withFaces && !forFaceId,
     warnings,
   };
 }
@@ -179,6 +194,7 @@ function sanitize(input: Partial<GenerationParams>): GenerationParams {
     characterId: typeof p.characterId === "string" ? p.characterId : "",
     loraStrength: clamp(p.loraStrength, 0, 1.5, DEFAULT_PARAMS.loraStrength),
     useCharacterRefs: p.useCharacterRefs !== false,
+    faceSwapAfter: p.faceSwapAfter !== false,
     controlStrength: clamp(p.controlStrength, 0, 2, DEFAULT_PARAMS.controlStrength),
     denoise: clamp(p.denoise, 0.3, 1, 1),
     refineFace: p.refineFace !== false,

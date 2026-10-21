@@ -305,6 +305,23 @@ export function ControlPanel({
             onChange={(identityWeight) => setParams({ identityWeight })}
           />
         )}
+        {hasFace && !isRemix && (
+          <label className="flex cursor-pointer items-center justify-between gap-3 text-xs">
+            <span>
+              Finish with a face swap
+              <span className="block text-[11px] text-muted-foreground">
+                Pastes the reference face onto the result (ReActor), so the likeness doesn&apos;t depend on the LoRA.
+                {!isVideo && " Stills get the face refine pass too."}
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={p.faceSwapAfter}
+              onChange={(e) => setParams({ faceSwapAfter: e.target.checked })}
+              className="size-4 accent-primary"
+            />
+          </label>
+        )}
       </div>
 
       <Separator />
